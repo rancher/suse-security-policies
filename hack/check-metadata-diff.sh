@@ -22,7 +22,7 @@ ALLOWED_ANNOTATIONS=(
   "io.kubewarden.policy.author"
   "io.kubewarden.policy.url"
   "io.kubewarden.policy.source"
-  "io.kubewarden.policy.kwctl-version"
+  "io.kubewarden.kwctl"
   "com.suse.policy.upstream.repository"
   "com.suse.policy.upstream.tag"
   "com.suse.policy.upstream.digest"

@@ -9,13 +9,26 @@ runs:
     - name: Install cosign
       uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-    - name: Install kwctl
+    - name: Read the pinned tool versions
+      id: versions
       shell: bash
       run: |
         set -euo pipefail
+        {
+          echo "kwctl=$(yq -r '.tools.kwctl.version' config.yaml)"
+          echo "kwctl-checksum=$(yq -r '.tools.kwctl.checksum' config.yaml)"
+          echo "wasm-tools=$(yq -r '.tools.wasm_tools.version' config.yaml)"
+          echo "wasm-tools-checksum=$(yq -r '.tools.wasm_tools.checksum' config.yaml)"
+        } >> "$GITHUB_OUTPUT"
 
-        KWCTL_VERSION=$(yq -r '.tools.kwctl.version' config.yaml)
-        KWCTL_CHECKSUM=$(yq -r '.tools.kwctl.checksum' config.yaml)
+    - name: Install kwctl
+      shell: bash
+      env:
+        KWCTL_VERSION: ${{ steps.versions.outputs.kwctl }}
+        KWCTL_CHECKSUM: ${{ steps.versions.outputs.kwctl-checksum }}
+      run: |
+        set -euo pipefail
+
         ASSET="kwctl-linux-x86_64"
         INSTALL_DIR="$HOME/.kwctl"
 
@@ -28,6 +41,39 @@ runs:
 
         mv "$INSTALL_DIR/$ASSET" "$INSTALL_DIR/kwctl"
         chmod 755 "$INSTALL_DIR/kwctl"
-        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
 
-        "$INSTALL_DIR/kwctl" -V
+    - name: Install wasm-tools
+      shell: bash
+      env:
+        WASM_TOOLS_VERSION: ${{ steps.versions.outputs.wasm-tools }}
+        WASM_TOOLS_CHECKSUM: ${{ steps.versions.outputs.wasm-tools-checksum }}
+      run: |
+        set -euo pipefail
+
+        ASSET="wasm-tools-${WASM_TOOLS_VERSION}-x86_64-linux"
+        INSTALL_DIR="$HOME/.wasm-tools"
+
+        mkdir -p "$INSTALL_DIR"
+        curl -sL "https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS_VERSION}/${ASSET}.tar.gz" \
+          -o "$INSTALL_DIR/wasm-tools.tar.gz"
+        echo "${WASM_TOOLS_CHECKSUM}  $INSTALL_DIR/wasm-tools.tar.gz" | sha256sum -c -
+        tar xzf "$INSTALL_DIR/wasm-tools.tar.gz" -C "$INSTALL_DIR"
+        rm "$INSTALL_DIR/wasm-tools.tar.gz"
+
+        mv "$INSTALL_DIR/${ASSET}/wasm-tools" "$INSTALL_DIR/wasm-tools"
+        rm -rf "$INSTALL_DIR/${ASSET}"
+        chmod 755 "$INSTALL_DIR/wasm-tools"
+
+    - name: Add the tools to the PATH
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "$HOME/.kwctl" >> "$GITHUB_PATH"
+        echo "$HOME/.wasm-tools" >> "$GITHUB_PATH"
+
+    - name: Show the tool versions
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$HOME/.kwctl/kwctl" --version
+        "$HOME/.wasm-tools/wasm-tools" --version

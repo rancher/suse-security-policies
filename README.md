@@ -128,6 +128,7 @@ they are demos and test fixtures. If upstream changes that list, update
 | `hack/discover-releases.sh` | Decide which upstream releases still need repackaging |
 | `hack/adapt-metadata.sh` | Rewrite the provenance annotations for SUSE |
 | `hack/check-metadata-diff.sh` | Fail if anything outside the allowlist changed |
+| `hack/check-repackaged-metadata.sh` | Fail if the result does not carry the new metadata |
 | `hack/adapt-sbom.sh` | Rewrite SPDX document provenance |
 | `hack/render-changelog.sh` | Build the release notes from the upstream changelog |
 

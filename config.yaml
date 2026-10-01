@@ -65,3 +65,10 @@ tools:
     version: v1.35.0
     # sha256 of kwctl-linux-x86_64.zip for the version above.
     checksum: 2f518033989a897c2f502a2f4fa90b3ca666eee976a82d045abdea5022330341
+  # wasm-tools removes the metadata section that kwctl leaves behind.
+  # The project publishes no checksum file, so the value below was computed
+  # from the released archive.
+  wasm_tools:
+    version: 1.260.0
+    # sha256 of wasm-tools-1.260.0-x86_64-linux.tar.gz
+    checksum: 2112785b5cf397dc348002988ce65c4db48fea728543eb18e4df21f674c7fcdc

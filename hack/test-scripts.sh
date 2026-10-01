@@ -142,10 +142,19 @@ guard() {
 check "accepts the legitimate adaptation" \
   "accepted" "$(guard "$WORKDIR/suse-metadata.yml")"
 
-yq '.annotations."io.kubewarden.policy.kwctl-version" = "1.35.0"' \
+# kwctl stamps the module with the version of the tool that annotated it. The
+# key is "io.kubewarden.kwctl", which is the name the policy evaluator uses.
+yq '.annotations."io.kubewarden.kwctl" = "1.35.0"' \
   "$WORKDIR/suse-metadata.yml" > "$WORKDIR/kwctl-stamp.yml"
 check "accepts the kwctl version stamp" \
   "accepted" "$(guard "$WORKDIR/kwctl-stamp.yml")"
+
+# A module that kept the upstream metadata section reads back with the
+# upstream values. The guard cannot see this, because it compares the two
+# files and they are then equal. The workflow has a separate check for it.
+# This test records what the guard does, so the behaviour stays visible.
+check "cannot see a module that kept the upstream metadata" \
+  "accepted" "$(guard "$WORKDIR/upstream-metadata.yml")"
 
 yq '.mutating = true' "$WORKDIR/suse-metadata.yml" > "$WORKDIR/mutating.yml"
 check "rejects a flipped mutating flag" \
@@ -168,6 +177,34 @@ yq 'del(.annotations."io.artifacthub.displayName")' \
   "$WORKDIR/suse-metadata.yml" > "$WORKDIR/dropped.yml"
 check "rejects a dropped annotation" \
   "rejected" "$(guard "$WORKDIR/dropped.yml")"
+
+# ---------------------------------------------------------------------------
+echo "repackaged metadata check"
+# ---------------------------------------------------------------------------
+
+repackaged_check() {
+  POLICY_ID=pod-privileged UPSTREAM_DIGEST=sha256:cafe \
+    ./hack/check-repackaged-metadata.sh "$1" >/dev/null 2>&1 \
+    && echo accepted || echo rejected
+}
+
+check "accepts the adapted metadata" \
+  "accepted" "$(repackaged_check "$WORKDIR/suse-metadata.yml")"
+
+# This is the case the diff guard cannot see. A module that kept the metadata
+# section of the upstream module reads back with the upstream values.
+check "rejects metadata that still points at the upstream registry" \
+  "rejected" "$(repackaged_check "$WORKDIR/upstream-metadata.yml")"
+
+yq 'del(.annotations."com.suse.policy.upstream.digest")' \
+  "$WORKDIR/suse-metadata.yml" > "$WORKDIR/no-digest.yml"
+check "rejects metadata without the upstream digest" \
+  "rejected" "$(repackaged_check "$WORKDIR/no-digest.yml")"
+
+yq '.annotations."com.suse.policy.upstream.digest" = "sha256:0000"' \
+  "$WORKDIR/suse-metadata.yml" > "$WORKDIR/wrong-digest.yml"
+check "rejects metadata that records another digest" \
+  "rejected" "$(repackaged_check "$WORKDIR/wrong-digest.yml")"
 
 # ---------------------------------------------------------------------------
 echo "changelog rendering"

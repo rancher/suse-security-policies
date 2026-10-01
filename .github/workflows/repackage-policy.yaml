@@ -72,8 +72,11 @@ jobs:
           # The identity is pinned to the exact tag being repackaged. A looser
           # pattern would accept any artifact signed by the upstream release
           # workflow, including one for a different policy or version.
+          # The dots of the tag are escaped, because the template is a regular
+          # expression and an unescaped dot matches any character.
           identity=$(yq -r '.upstream.certificate_identity_template' config.yaml)
-          identity="${identity//\{tag\}/${UPSTREAM_TAG}}"
+          escaped_tag="${UPSTREAM_TAG//./\\.}"
+          identity="${identity//\{tag\}/${escaped_tag}}"
           echo "identity=${identity}" >> "$GITHUB_OUTPUT"
           echo "Expected upstream signer identity: ${identity}"
 
@@ -141,7 +144,9 @@ jobs:
       - name: Extract the upstream metadata
         run: |
           set -euo pipefail
-          kwctl inspect -o yaml --no-signatures upstream-policy.wasm > upstream-metadata.yml
+          # kwctl shows no signatures unless --show-signatures is given, thus
+          # this reads the metadata without a call to the registry.
+          kwctl inspect -o yaml upstream-policy.wasm > upstream-metadata.yml
           cat upstream-metadata.yml
 
       - name: Adapt the metadata
@@ -149,16 +154,34 @@ jobs:
           UPSTREAM_DIGEST: ${{ steps.verify.outputs.digest }}
         run: ./hack/adapt-metadata.sh upstream-metadata.yml suse-metadata.yml
 
+      - name: Remove the metadata section of the upstream module
+        run: |
+          set -euo pipefail
+          # kwctl annotate adds a metadata section instead of replacing the
+          # one that is already there, and a reader takes the first section it
+          # finds. Without this step the repackaged module keeps the upstream
+          # metadata and still points at the upstream registry.
+          #
+          # The expression is anchored, because --delete is a regular
+          # expression that matches any part of the section name.
+          wasm-tools strip -d '^io\.kubewarden\.metadata$' \
+            upstream-policy.wasm -o stripped-policy.wasm
+
       - name: Re-annotate the policy
         run: |
           set -euo pipefail
-          kwctl annotate -m suse-metadata.yml -o suse-policy.wasm upstream-policy.wasm
+          kwctl annotate -m suse-metadata.yml -o suse-policy.wasm stripped-policy.wasm
 
       - name: Check that only provenance metadata changed
         run: |
           set -euo pipefail
-          kwctl inspect -o yaml --no-signatures suse-policy.wasm > repackaged-metadata.yml
+          kwctl inspect -o yaml suse-policy.wasm > repackaged-metadata.yml
           ./hack/check-metadata-diff.sh upstream-metadata.yml repackaged-metadata.yml
+
+      - name: Check that the repackaged policy carries the new metadata
+        env:
+          UPSTREAM_DIGEST: ${{ steps.verify.outputs.digest }}
+        run: ./hack/check-repackaged-metadata.sh repackaged-metadata.yml
 
       # ----------------------------------------------------------------------
       # 3. Verify, adapt and re-sign the SBOM
