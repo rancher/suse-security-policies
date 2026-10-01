@@ -21,7 +21,20 @@ runs:
           echo "wasm-tools-checksum=$(yq -r '.tools.wasm_tools.checksum' config.yaml)"
         } >> "$GITHUB_OUTPUT"
 
+    - name: Restore the cached tools
+      id: cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.kwctl
+          ~/.wasm-tools
+        # Both pinned versions are part of the key, so a version bump misses
+        # the cache. There is deliberately no restore-keys fallback: a stale
+        # binary must never be served under a new pin.
+        key: tools-${{ runner.os }}-kwctl-${{ steps.versions.outputs.kwctl }}-wasmtools-${{ steps.versions.outputs.wasm-tools }}
+
     - name: Install kwctl
+      if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         KWCTL_VERSION: ${{ steps.versions.outputs.kwctl }}
@@ -43,6 +56,7 @@ runs:
         chmod 755 "$INSTALL_DIR/kwctl"
 
     - name: Install wasm-tools
+      if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         WASM_TOOLS_VERSION: ${{ steps.versions.outputs.wasm-tools }}
@@ -64,6 +78,8 @@ runs:
         rm -rf "$INSTALL_DIR/${ASSET}"
         chmod 755 "$INSTALL_DIR/wasm-tools"
 
+    # The two steps above are skipped on a cache hit, so the PATH must be set
+    # here instead of inside them.
     - name: Add the tools to the PATH
       shell: bash
       run: |
