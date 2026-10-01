@@ -1,0 +1,33 @@
+name: "Install repackaging dependencies"
+description: "Install the binaries needed to verify, repackage and sign upstream policies"
+branding:
+  icon: "package"
+  color: "blue"
+runs:
+  using: "composite"
+  steps:
+    - name: Install cosign
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+    - name: Install kwctl
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        KWCTL_VERSION=$(yq -r '.tools.kwctl.version' config.yaml)
+        KWCTL_CHECKSUM=$(yq -r '.tools.kwctl.checksum' config.yaml)
+        ASSET="kwctl-linux-x86_64"
+        INSTALL_DIR="$HOME/.kwctl"
+
+        mkdir -p "$INSTALL_DIR"
+        curl -sL "https://github.com/kubewarden/kubewarden-controller/releases/download/${KWCTL_VERSION}/${ASSET}.zip" \
+          -o "$INSTALL_DIR/$ASSET.zip"
+        echo "${KWCTL_CHECKSUM}  $INSTALL_DIR/$ASSET.zip" | sha256sum -c -
+        unzip -o "$INSTALL_DIR/$ASSET.zip" -d "$INSTALL_DIR"
+        rm "$INSTALL_DIR/$ASSET.zip"
+
+        mv "$INSTALL_DIR/$ASSET" "$INSTALL_DIR/kwctl"
+        chmod 755 "$INSTALL_DIR/kwctl"
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+
+        "$INSTALL_DIR/kwctl" -V

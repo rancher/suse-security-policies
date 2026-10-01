@@ -1,0 +1,312 @@
+name: Repackage a policy
+
+# Repackages a single upstream policy release:
+#
+#   1. verify the upstream Wasm module signature, pinned to the exact tag
+#   2. rewrite its provenance metadata for SUSE
+#   3. verify and adapt the upstream SBOM
+#   4. push and sign the artifact in the destination registry
+#   5. publish a GitHub release carrying the upstream changelog
+#
+# The GitHub release is created last on purpose: its existence is what the
+# discovery workflow uses to decide a version is fully published, so a failure
+# at any earlier step leaves no release behind and the next run retries.
+
+on:
+  workflow_call:
+    inputs:
+      policy-name:
+        description: "Upstream policy directory name, for example 'pod-privileged-policy'"
+        required: true
+        type: string
+      policy-id:
+        description: "Policy id, the last segment of the ociUrl annotation, for example 'pod-privileged'"
+        required: true
+        type: string
+      version:
+        description: "Policy version without the 'v' prefix"
+        required: true
+        type: string
+      tag:
+        description: "Upstream release tag, '<policy-name>/v<version>'"
+        required: true
+        type: string
+      upstream-release-url:
+        description: "URL of the upstream GitHub release"
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  repackage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    env:
+      POLICY_NAME: ${{ inputs.policy-name }}
+      POLICY_ID: ${{ inputs.policy-id }}
+      POLICY_VERSION: ${{ inputs.version }}
+      UPSTREAM_TAG: ${{ inputs.tag }}
+      UPSTREAM_RELEASE_URL: ${{ inputs.upstream-release-url }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install dependencies
+        uses: ./.github/actions/install-dependencies
+
+      - name: Read configuration
+        id: config
+        run: |
+          set -euo pipefail
+          {
+            echo "upstream-repository=$(yq -r '.upstream.repository' config.yaml)"
+            echo "upstream-registry=$(yq -r '.upstream.registry' config.yaml)"
+            echo "destination-registry=$(yq -r '.destination.registry' config.yaml)"
+            echo "oidc-issuer=$(yq -r '.upstream.certificate_oidc_issuer' config.yaml)"
+          } >> "$GITHUB_OUTPUT"
+
+          # The identity is pinned to the exact tag being repackaged. A looser
+          # pattern would accept any artifact signed by the upstream release
+          # workflow, including one for a different policy or version.
+          identity=$(yq -r '.upstream.certificate_identity_template' config.yaml)
+          identity="${identity//\{tag\}/${UPSTREAM_TAG}}"
+          echo "identity=${identity}" >> "$GITHUB_OUTPUT"
+          echo "Expected upstream signer identity: ${identity}"
+
+      - name: Log in to the container registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ----------------------------------------------------------------------
+      # 1. Verify the upstream artifact
+      # ----------------------------------------------------------------------
+
+      - name: Verify the upstream policy signature
+        id: verify
+        env:
+          UPSTREAM_REGISTRY: ${{ steps.config.outputs.upstream-registry }}
+          IDENTITY: ${{ steps.config.outputs.identity }}
+          OIDC_ISSUER: ${{ steps.config.outputs.oidc-issuer }}
+        run: |
+          set -euo pipefail
+          REF="${UPSTREAM_REGISTRY}/${POLICY_ID}:v${POLICY_VERSION}"
+
+          # Upstream signs every release twice, once in the legacy bundle
+          # format and once in the v3 format. Accept either, but require at
+          # least one to verify against the pinned identity.
+          verified=false
+          for bundle_format in false true; do
+            echo "::group::cosign verify --new-bundle-format=${bundle_format}"
+            if cosign verify "$REF" \
+              --certificate-identity-regexp "$IDENTITY" \
+              --certificate-oidc-issuer "$OIDC_ISSUER" \
+              --new-bundle-format="$bundle_format"; then
+              verified=true
+            fi
+            echo "::endgroup::"
+          done
+
+          if [ "$verified" != "true" ]; then
+            echo "::error::Could not verify the signature of ${REF} against ${IDENTITY}"
+            exit 1
+          fi
+
+          # Resolve the tag to a digest once and use the digest from here on,
+          # so a tag moved between verification and pull cannot swap the
+          # artifact underneath us.
+          DIGEST=$(cosign triangulate --type digest "$REF")
+          echo "Upstream artifact resolved to ${DIGEST}"
+          echo "digest=${DIGEST#*@}" >> "$GITHUB_OUTPUT"
+          echo "ref=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Pull the upstream policy
+        env:
+          UPSTREAM_REF: ${{ steps.verify.outputs.ref }}
+        run: |
+          set -euo pipefail
+          kwctl pull "registry://${UPSTREAM_REF}" -o upstream-policy.wasm
+          ls -l upstream-policy.wasm
+
+      # ----------------------------------------------------------------------
+      # 2. Adapt the metadata and re-annotate
+      # ----------------------------------------------------------------------
+
+      - name: Extract the upstream metadata
+        run: |
+          set -euo pipefail
+          kwctl inspect -o yaml --no-signatures upstream-policy.wasm > upstream-metadata.yml
+          cat upstream-metadata.yml
+
+      - name: Adapt the metadata
+        env:
+          UPSTREAM_DIGEST: ${{ steps.verify.outputs.digest }}
+        run: ./hack/adapt-metadata.sh upstream-metadata.yml suse-metadata.yml
+
+      - name: Re-annotate the policy
+        run: |
+          set -euo pipefail
+          kwctl annotate -m suse-metadata.yml -o suse-policy.wasm upstream-policy.wasm
+
+      - name: Check that only provenance metadata changed
+        run: |
+          set -euo pipefail
+          kwctl inspect -o yaml --no-signatures suse-policy.wasm > repackaged-metadata.yml
+          ./hack/check-metadata-diff.sh upstream-metadata.yml repackaged-metadata.yml
+
+      # ----------------------------------------------------------------------
+      # 3. Verify, adapt and re-sign the SBOM
+      # ----------------------------------------------------------------------
+
+      - name: Download the upstream SBOM
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_REPOSITORY: ${{ steps.config.outputs.upstream-repository }}
+        run: |
+          set -euo pipefail
+          gh release download "$UPSTREAM_TAG" \
+            --repo "$UPSTREAM_REPOSITORY" \
+            --pattern 'policy-sbom.spdx.json' \
+            --pattern 'policy-sbom.spdx.jsonl.bundle.sigstore' \
+            --dir upstream-sbom
+
+          # A release without SBOM assets is a hard failure: shipping a policy
+          # without the provenance upstream published for it would quietly
+          # downgrade what consumers get.
+          for asset in policy-sbom.spdx.json policy-sbom.spdx.jsonl.bundle.sigstore; do
+            if [ ! -s "upstream-sbom/${asset}" ]; then
+              echo "::error::${UPSTREAM_TAG} has no ${asset} asset"
+              exit 1
+            fi
+          done
+
+      - name: Verify the upstream SBOM signature
+        env:
+          IDENTITY: ${{ steps.config.outputs.identity }}
+          OIDC_ISSUER: ${{ steps.config.outputs.oidc-issuer }}
+        run: |
+          set -euo pipefail
+          cosign verify-blob upstream-sbom/policy-sbom.spdx.json \
+            --bundle upstream-sbom/policy-sbom.spdx.jsonl.bundle.sigstore \
+            --certificate-identity-regexp "$IDENTITY" \
+            --certificate-oidc-issuer "$OIDC_ISSUER"
+
+      - name: Adapt the SBOM
+        env:
+          UPSTREAM_REPOSITORY_URL: https://github.com/${{ steps.config.outputs.upstream-repository }}
+        run: ./hack/adapt-sbom.sh upstream-sbom/policy-sbom.spdx.json policy-sbom.spdx.json
+
+      - name: Sign the SBOM
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --bundle policy-sbom.spdx.jsonl.bundle.sigstore \
+            policy-sbom.spdx.json
+
+      # ----------------------------------------------------------------------
+      # 4. Publish and sign the artifact
+      # ----------------------------------------------------------------------
+
+      - name: Push the repackaged policy
+        id: push
+        env:
+          DESTINATION_REGISTRY: ${{ steps.config.outputs.destination-registry }}
+        run: |
+          set -euo pipefail
+          REF="${DESTINATION_REGISTRY}/${POLICY_ID}:v${POLICY_VERSION}"
+
+          IMMUTABLE_REF=$(kwctl push -o json suse-policy.wasm "$REF" | jq -r .immutable_ref)
+          echo "Pushed ${IMMUTABLE_REF}"
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "immutable-ref=${IMMUTABLE_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign the repackaged policy
+        env:
+          IMMUTABLE_REF: ${{ steps.push.outputs.immutable-ref }}
+        run: |
+          set -euo pipefail
+          # Mirror the two signature formats upstream produces, so that tools
+          # which cannot read the v3 bundle format keep working.
+          cosign sign --yes --new-bundle-format=false --use-signing-config=false "$IMMUTABLE_REF"
+          cosign sign --yes --new-bundle-format=true --use-signing-config=true "$IMMUTABLE_REF"
+
+      - name: Verify the published signature
+        env:
+          IMMUTABLE_REF: ${{ steps.push.outputs.immutable-ref }}
+          OIDC_ISSUER: ${{ steps.config.outputs.oidc-issuer }}
+        run: |
+          set -euo pipefail
+          # Verify our own signature before advertising the artifact. This
+          # catches a misconfigured signing step while the release does not
+          # exist yet, instead of after consumers have been pointed at it.
+          # The resulting attestation is attached to the release so the
+          # signature can be inspected without pulling from the registry.
+          cosign verify "$IMMUTABLE_REF" \
+            --certificate-identity-regexp "^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/repackage-policy\.yaml@" \
+            --certificate-oidc-issuer "$OIDC_ISSUER" \
+            --new-bundle-format=false \
+            > policy-signature.bundle.json
+
+          jq . policy-signature.bundle.json > /dev/null
+
+      # ----------------------------------------------------------------------
+      # 5. Publish the release
+      # ----------------------------------------------------------------------
+
+      - name: Render the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_REPOSITORY: ${{ steps.config.outputs.upstream-repository }}
+          UPSTREAM_DIGEST: ${{ steps.verify.outputs.digest }}
+          DEST_OCI_REF: ${{ steps.push.outputs.immutable-ref }}
+        run: |
+          set -euo pipefail
+          gh release view "$UPSTREAM_TAG" \
+            --repo "$UPSTREAM_REPOSITORY" \
+            --json body --jq '.body' > upstream-body.md
+
+          ./hack/render-changelog.sh upstream-body.md > release-notes.md
+          cat release-notes.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # A previous run may have failed after pushing but before releasing.
+          # Clean up any draft or partial release so the retry is idempotent.
+          if gh release view "$UPSTREAM_TAG" >/dev/null 2>&1; then
+            echo "Deleting the existing release for ${UPSTREAM_TAG} before recreating it"
+            gh release delete "$UPSTREAM_TAG" --yes --cleanup-tag
+          fi
+
+          gh release create "$UPSTREAM_TAG" \
+            --title "$UPSTREAM_TAG" \
+            --notes-file release-notes.md \
+            --latest \
+            suse-policy.wasm \
+            policy-sbom.spdx.json \
+            policy-sbom.spdx.jsonl.bundle.sigstore \
+            policy-signature.bundle.json
+
+      - name: Summarise
+        env:
+          DEST_OCI_REF: ${{ steps.push.outputs.immutable-ref }}
+          UPSTREAM_DIGEST: ${{ steps.verify.outputs.digest }}
+        run: |
+          {
+            echo "### Repackaged ${UPSTREAM_TAG}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Verified upstream digest | \`${UPSTREAM_DIGEST}\` |"
+            echo "| Published artifact | \`${DEST_OCI_REF}\` |"
+            echo "| Release | ${UPSTREAM_TAG} |"
+          } >> "$GITHUB_STEP_SUMMARY"
