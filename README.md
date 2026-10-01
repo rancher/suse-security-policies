@@ -135,6 +135,17 @@ they are demos and test fixtures. If upstream changes that list, update
 They read `config.yaml` and take their inputs from the environment, so they can
 be run locally.
 
+## Known kwctl behaviour
+
+`kwctl annotate` adds a metadata section to the module instead of replacing the
+section that is already there, and a reader takes the first section it finds. A
+module that is annotated a second time therefore keeps reporting the old
+metadata.
+
+The workflow removes the old section with `wasm-tools` before it annotates the
+module, and `hack/check-repackaged-metadata.sh` then confirms that the result
+carries the new values.
+
 ## Known limitations
 
 - **The SBOM describes upstream source, not our artifact.** Upstream generates
