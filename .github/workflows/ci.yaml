@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Check the shell scripts
+        run: shellcheck hack/*.sh
+
+      - name: Check that config.yaml is valid
+        run: |
+          set -euo pipefail
+          yq -e '.upstream.repository' config.yaml > /dev/null
+          yq -e '.destination.registry' config.yaml > /dev/null
+          yq -e '.excluded_policies | length > 0' config.yaml > /dev/null
+          echo "config.yaml looks sane"
+
+  test:
+    name: Test the helper scripts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Run the script tests
+        run: ./hack/test-scripts.sh
