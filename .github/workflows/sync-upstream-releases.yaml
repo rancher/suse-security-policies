@@ -1,0 +1,104 @@
+name: Sync upstream policy releases
+
+on:
+  schedule:
+    # Hourly. Upstream releases are infrequent, so this mostly exits after the
+    # discovery job finds nothing to do.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      policy-name:
+        description: "Repackage only this policy, for example 'pod-privileged-policy'. Leave empty for all policies."
+        required: false
+        type: string
+        default: ""
+      policy-version:
+        description: "Pin the version to repackage, without the 'v' prefix. Requires policy-name."
+        required: false
+        type: string
+        default: ""
+      force:
+        description: "Repackage even if a release already exists in this repository."
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+# Two overlapping runs would discover the same releases and race to create the
+# same tag. Queue them instead, and never cancel a run that may already be
+# halfway through publishing.
+concurrency:
+  group: sync-upstream-releases
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Discover releases to repackage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+      count: ${{ steps.discover.outputs.count }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Discover upstream releases without a matching release here
+        id: discover
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEST_REPOSITORY: ${{ github.repository }}
+          FILTER_POLICY_NAME: ${{ inputs.policy-name }}
+          FILTER_POLICY_VERSION: ${{ inputs.policy-version }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          matrix=$(./hack/discover-releases.sh)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "count=$(jq 'length' <<<"$matrix")" >> "$GITHUB_OUTPUT"
+
+      - name: Summarise
+        env:
+          MATRIX: ${{ steps.discover.outputs.matrix }}
+        run: |
+          {
+            echo "### Policies queued for repackaging"
+            echo
+            if [ "$(jq 'length' <<<"$MATRIX")" -eq 0 ]; then
+              echo "Nothing to do, every upstream release already has a matching release here."
+            else
+              echo "| Policy | Version | Upstream release |"
+              echo "|---|---|---|"
+              jq -r '.[] | "| \(.policy_name) | \(.version) | [\(.tag)](\(.upstream_release_url)) |"' <<<"$MATRIX"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  repackage:
+    name: ${{ matrix.policy.tag }}
+    needs: discover
+    if: needs.discover.outputs.count != '0'
+    concurrency:
+      group: repackage-${{ matrix.policy.tag }}
+      cancel-in-progress: false
+    permissions:
+      # Create the GitHub release and its tag
+      contents: write
+      # Push to the destination OCI registry
+      packages: write
+      # Required by cosign keyless signing
+      id-token: write
+    strategy:
+      fail-fast: false
+      # Keep the number of concurrent jobs low to stay clear of the GitHub API
+      # and registry rate limits.
+      max-parallel: 5
+      matrix:
+        policy: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    uses: ./.github/workflows/repackage-policy.yaml
+    with:
+      policy-name: ${{ matrix.policy.policy_name }}
+      policy-id: ${{ matrix.policy.policy_id }}
+      version: ${{ matrix.policy.version }}
+      tag: ${{ matrix.policy.tag }}
+      upstream-release-url: ${{ matrix.policy.upstream_release_url }}

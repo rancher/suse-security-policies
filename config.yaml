@@ -1,0 +1,74 @@
+# Configuration for the upstream policy repackaging pipeline.
+#
+# This repository does not hold any policy source code. It consumes the
+# releases published by the upstream repository, verifies them, adapts their
+# metadata and SBOM to SUSE, re-signs everything with this repository's own
+# identity and republishes the result.
+
+upstream:
+  # Repository that publishes the policies we repackage.
+  repository: kubewarden/policies
+
+  # OCI registry namespace where the upstream signed Wasm modules live.
+  # The full reference is "<registry>/<policy-id>:v<version>".
+  registry: ghcr.io/kubewarden/policies
+
+  # Sigstore identity expected on the upstream artifacts. "{tag}" is replaced
+  # with the release tag (for example "pod-privileged-policy/v1.0.13") so that
+  # the identity is pinned to the exact release being repackaged instead of
+  # accepting anything signed by the upstream repository.
+  certificate_identity_template: "^https://github\\.com/kubewarden/policies/\\.github/workflows/release\\.yml@refs/tags/{tag}$"
+  certificate_oidc_issuer: https://token.actions.githubusercontent.com
+
+destination:
+  # OCI registry namespace that receives the repackaged modules.
+  # Keep this in sync with the "io.kubewarden.policy.ociUrl" annotation below.
+  registry: ghcr.io/rancher/suse-security-policies
+
+# Annotation values applied to every repackaged policy. "ociUrl" is derived
+# from destination.registry and the policy id, so it is not listed here.
+metadata:
+  author: "SUSE <containers@suse.com>"
+  url: https://github.com/rancher/suse-security-policies
+  source: https://github.com/rancher/suse-security-policies
+
+sbom:
+  # Organisation added to the SPDX creationInfo.creators list. The upstream
+  # creator entries are preserved so the original tooling stays attributable.
+  organization: SUSE
+  # Base URI used to build a fresh SPDX documentNamespace. A namespace must be
+  # unique per document, so it has to be regenerated once we change content.
+  namespace_base: https://github.com/rancher/suse-security-policies/spdx
+  supplier: "Organization: SUSE"
+  download_location: https://github.com/rancher/suse-security-policies/releases
+
+# Policies that upstream builds but does not publish to ArtifactHub or the
+# policy catalog. They are demos, test fixtures or internal helpers, so there
+# is nothing for us to repackage. Mirrors EXCLUDED_FROM_PUBLISHING in the
+# upstream release workflow.
+excluded_policies:
+  - context-aware-demo
+  - go-wasi-context-aware-test-policy
+  - raw-mutation-policy
+  - raw-mutation-wasi-policy
+  - raw-validation-opa-policy
+  - raw-validation-policy
+  - raw-validation-wasi-policy
+  - sleeping-policy
+  - runtime-enforcer-policy
+
+# "yq", "jq" and "gh" are preinstalled on the GitHub hosted runner images, so
+# they are not pinned here. "cosign" is pinned through the action SHA in the
+# install-dependencies composite action.
+tools:
+  kwctl:
+    version: v1.35.0
+    # sha256 of kwctl-linux-x86_64.zip for the version above.
+    checksum: 2f518033989a897c2f502a2f4fa90b3ca666eee976a82d045abdea5022330341
+  # wasm-tools removes the metadata section that kwctl leaves behind.
+  # The project publishes no checksum file, so the value below was computed
+  # from the released archive.
+  wasm_tools:
+    version: 1.260.0
+    # sha256 of wasm-tools-1.260.0-x86_64-linux.tar.gz
+    checksum: 2112785b5cf397dc348002988ce65c4db48fea728543eb18e4df21f674c7fcdc
