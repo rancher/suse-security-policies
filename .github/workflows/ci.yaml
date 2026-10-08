@@ -31,6 +31,16 @@ jobs:
           yq -e '.upstream.repository' config.yaml > /dev/null
           yq -e '.destination.registry' config.yaml > /dev/null
           yq -e '.excluded_policies | length > 0' config.yaml > /dev/null
+          # Every one of these ends up in a signed SPDX document, so a missing
+          # value must fail here rather than produce a document with the string
+          # "null" in a provenance field.
+          for key in namespace_base supplier originator tool_name; do
+            yq -e ".sbom.${key}" config.yaml > /dev/null
+          done
+          for tool in kwctl wasm_tools sbom_utility; do
+            yq -e ".tools.${tool}.version" config.yaml > /dev/null
+            yq -e ".tools.${tool}.checksum" config.yaml > /dev/null
+          done
           echo "config.yaml looks sane"
 
   test:

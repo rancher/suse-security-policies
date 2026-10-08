@@ -5,6 +5,8 @@
 discover-releases.json
 policy-sbom.spdx.json
 policy-sbom.spdx.jsonl.bundle.sigstore
+upstream-policy-sbom.spdx.json
+upstream-policy-sbom.spdx.jsonl.bundle.sigstore
 policy-signature.bundle.json
 release-notes.md
 upstream-body.md

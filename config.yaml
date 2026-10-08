@@ -32,15 +32,21 @@ metadata:
   url: https://github.com/rancher/suse-security-policies
   source: https://github.com/rancher/suse-security-policies
 
+# Every release carries two SBOMs. The upstream document is republished
+# byte-identical, so it keeps verifying against the upstream Sigstore identity.
+# The values below describe the second document, which this pipeline generates
+# from scratch to describe the artifact we actually ship.
 sbom:
-  # Organisation added to the SPDX creationInfo.creators list. The upstream
-  # creator entries are preserved so the original tooling stays attributable.
-  organization: SUSE
-  # Base URI used to build a fresh SPDX documentNamespace. A namespace must be
-  # unique per document, so it has to be regenerated once we change content.
+  # Base URI used to build the SPDX documentNamespace. A namespace must be
+  # unique per document, so a uuid4 is appended at generation time.
   namespace_base: https://github.com/rancher/suse-security-policies/spdx
+  # SPDX separates the party that distributes an artifact from the party that
+  # created its content. We are the supplier, upstream is the originator.
   supplier: "Organization: SUSE"
-  download_location: https://github.com/rancher/suse-security-policies/releases
+  originator: "Organization: Kubewarden (cncf-kubewarden-maintainers@lists.cncf.io)"
+  # Recorded in creationInfo.creators as "Tool: <tool_name>-<commit sha>", so a
+  # document can always be traced back to the generator that produced it.
+  tool_name: suse-security-policies
 
 # Policies that upstream builds but does not publish to ArtifactHub or the
 # policy catalog. They are demos, test fixtures or internal helpers, so there
@@ -72,3 +78,11 @@ tools:
     version: 1.260.0
     # sha256 of wasm-tools-1.260.0-x86_64-linux.tar.gz
     checksum: 2112785b5cf397dc348002988ce65c4db48fea728543eb18e4df21f674c7fcdc
+  # sbom-utility validates the generated SPDX document before it is signed.
+  # It carries the SPDX 2.3 schema internally, so no schema has to be vendored
+  # here. The project publishes only md5 sums, so the value below was computed
+  # from the released archive.
+  sbom_utility:
+    version: 0.19.2
+    # sha256 of sbom-utility-v0.19.2-linux-amd64.tar.gz
+    checksum: e0cd37e6e67b1d0e44dbb7b38e055a4e2ee66db590bb8e7f89e2d9b650f4490b

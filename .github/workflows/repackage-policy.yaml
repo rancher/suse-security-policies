@@ -4,9 +4,12 @@ name: Repackage a policy
 #
 #   1. verify the upstream Wasm module signature, pinned to the exact tag
 #   2. rewrite its provenance metadata for SUSE
-#   3. verify and adapt the upstream SBOM
-#   4. push and sign the artifact in the destination registry
+#   3. push and sign the artifact in the destination registry
+#   4. republish the upstream SBOM and generate, sign and attest the SUSE one
 #   5. publish a GitHub release carrying the upstream changelog
+#
+# The SBOMs come after the push, because the SUSE document records the digest
+# of the published artifact.
 #
 # The GitHub release is created last on purpose: its existence is what the
 # discovery workflow uses to decide a version is fully published, so a failure
@@ -184,56 +187,7 @@ jobs:
         run: ./hack/check-repackaged-metadata.sh repackaged-metadata.yml
 
       # ----------------------------------------------------------------------
-      # 3. Verify, adapt and re-sign the SBOM
-      # ----------------------------------------------------------------------
-
-      - name: Download the upstream SBOM
-        env:
-          GH_TOKEN: ${{ github.token }}
-          UPSTREAM_REPOSITORY: ${{ steps.config.outputs.upstream-repository }}
-        run: |
-          set -euo pipefail
-          gh release download "$UPSTREAM_TAG" \
-            --repo "$UPSTREAM_REPOSITORY" \
-            --pattern 'policy-sbom.spdx.json' \
-            --pattern 'policy-sbom.spdx.jsonl.bundle.sigstore' \
-            --dir upstream-sbom
-
-          # A release without SBOM assets is a hard failure: shipping a policy
-          # without the provenance upstream published for it would quietly
-          # downgrade what consumers get.
-          for asset in policy-sbom.spdx.json policy-sbom.spdx.jsonl.bundle.sigstore; do
-            if [ ! -s "upstream-sbom/${asset}" ]; then
-              echo "::error::${UPSTREAM_TAG} has no ${asset} asset"
-              exit 1
-            fi
-          done
-
-      - name: Verify the upstream SBOM signature
-        env:
-          IDENTITY: ${{ steps.config.outputs.identity }}
-          OIDC_ISSUER: ${{ steps.config.outputs.oidc-issuer }}
-        run: |
-          set -euo pipefail
-          cosign verify-blob upstream-sbom/policy-sbom.spdx.json \
-            --bundle upstream-sbom/policy-sbom.spdx.jsonl.bundle.sigstore \
-            --certificate-identity-regexp "$IDENTITY" \
-            --certificate-oidc-issuer "$OIDC_ISSUER"
-
-      - name: Adapt the SBOM
-        env:
-          UPSTREAM_REPOSITORY_URL: https://github.com/${{ steps.config.outputs.upstream-repository }}
-        run: ./hack/adapt-sbom.sh upstream-sbom/policy-sbom.spdx.json policy-sbom.spdx.json
-
-      - name: Sign the SBOM
-        run: |
-          set -euo pipefail
-          cosign sign-blob --yes \
-            --bundle policy-sbom.spdx.jsonl.bundle.sigstore \
-            policy-sbom.spdx.json
-
-      # ----------------------------------------------------------------------
-      # 4. Publish and sign the artifact
+      # 3. Publish and sign the artifact
       # ----------------------------------------------------------------------
 
       - name: Push the repackaged policy
@@ -279,6 +233,126 @@ jobs:
           jq . policy-signature.bundle.json > /dev/null
 
       # ----------------------------------------------------------------------
+      # 4. Publish the SBOMs
+      # ----------------------------------------------------------------------
+      #
+      # Two documents are released. The upstream one is republished unchanged,
+      # so "cosign verify-blob" against the upstream identity keeps working on
+      # the file we ship. The SUSE one is generated here and describes the
+      # artifact we actually publish, which the upstream document cannot do.
+      #
+      # This runs after the push, because the SUSE document records the
+      # manifest digest of the published artifact.
+
+      - name: Download the upstream SBOM
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_REPOSITORY: ${{ steps.config.outputs.upstream-repository }}
+        run: |
+          set -euo pipefail
+          gh release download "$UPSTREAM_TAG" \
+            --repo "$UPSTREAM_REPOSITORY" \
+            --pattern 'policy-sbom.spdx.json' \
+            --pattern 'policy-sbom.spdx.jsonl.bundle.sigstore' \
+            --dir upstream-sbom
+
+          # A release without SBOM assets is a hard failure: shipping a policy
+          # without the provenance upstream published for it would quietly
+          # downgrade what consumers get.
+          for asset in policy-sbom.spdx.json policy-sbom.spdx.jsonl.bundle.sigstore; do
+            if [ ! -s "upstream-sbom/${asset}" ]; then
+              echo "::error::${UPSTREAM_TAG} has no ${asset} asset"
+              exit 1
+            fi
+          done
+
+          # Renamed, never rewritten. The release carries both documents, so
+          # the names have to differ, but the bytes stay the ones upstream
+          # signed.
+          cp upstream-sbom/policy-sbom.spdx.json upstream-policy-sbom.spdx.json
+          cp upstream-sbom/policy-sbom.spdx.jsonl.bundle.sigstore \
+             upstream-policy-sbom.spdx.jsonl.bundle.sigstore
+
+      - name: Verify the upstream SBOM signature
+        env:
+          IDENTITY: ${{ steps.config.outputs.identity }}
+          OIDC_ISSUER: ${{ steps.config.outputs.oidc-issuer }}
+        run: |
+          set -euo pipefail
+          # Verified on the renamed copy, which is the file that reaches the
+          # release. That makes this both an authenticity check and a proof
+          # that the copy is byte identical to what upstream signed.
+          cosign verify-blob upstream-policy-sbom.spdx.json \
+            --bundle upstream-policy-sbom.spdx.jsonl.bundle.sigstore \
+            --certificate-identity-regexp "$IDENTITY" \
+            --certificate-oidc-issuer "$OIDC_ISSUER"
+
+      - name: Generate the SUSE SBOM
+        env:
+          UPSTREAM_REPOSITORY: ${{ steps.config.outputs.upstream-repository }}
+          UPSTREAM_DIGEST: ${{ steps.verify.outputs.digest }}
+          DEST_IMMUTABLE_REF: ${{ steps.push.outputs.immutable-ref }}
+          WASM_FILE: suse-policy.wasm
+          WASM_ASSET_NAME: suse-policy.wasm
+        run: |
+          set -euo pipefail
+          ./hack/generate-sbom.sh upstream-policy-sbom.spdx.json policy-sbom.spdx.json
+          cat policy-sbom.spdx.json
+
+      - name: Sign the SUSE SBOM
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --bundle policy-sbom.spdx.jsonl.bundle.sigstore \
+            policy-sbom.spdx.json
+
+      - name: Attest the SUSE SBOM to the published artifact
+        env:
+          IMMUTABLE_REF: ${{ steps.push.outputs.immutable-ref }}
+        run: |
+          set -euo pipefail
+          # A release asset is a file on a web page. An attestation lives in
+          # the registry next to the artifact, which is where Kubewarden pulls
+          # policies from, so this is what makes the SBOM reachable by anything
+          # that consumes the module rather than the release.
+          cosign attest --yes \
+            --type spdxjson \
+            --predicate policy-sbom.spdx.json \
+            "$IMMUTABLE_REF"
+
+      - name: Verify the SUSE SBOM signature and attestation
+        env:
+          IMMUTABLE_REF: ${{ steps.push.outputs.immutable-ref }}
+          OIDC_ISSUER: ${{ steps.config.outputs.oidc-issuer }}
+        run: |
+          set -euo pipefail
+          IDENTITY="^https://github\.com/${GITHUB_REPOSITORY}/\.github/workflows/repackage-policy\.yaml@"
+
+          # Both of our own claims are checked before the release exists, for
+          # the same reason the policy signature is: a misconfigured signing
+          # step must fail the run, not reach consumers.
+          cosign verify-blob policy-sbom.spdx.json \
+            --bundle policy-sbom.spdx.jsonl.bundle.sigstore \
+            --certificate-identity-regexp "$IDENTITY" \
+            --certificate-oidc-issuer "$OIDC_ISSUER"
+
+          cosign verify-attestation "$IMMUTABLE_REF" \
+            --type spdxjson \
+            --certificate-identity-regexp "$IDENTITY" \
+            --certificate-oidc-issuer "$OIDC_ISSUER" \
+            > /dev/null
+
+      - name: Check the SUSE SBOM against the artifacts
+        env:
+          DEST_IMMUTABLE_REF: ${{ steps.push.outputs.immutable-ref }}
+        run: |
+          set -euo pipefail
+          ./hack/verify-sbom.sh \
+            policy-sbom.spdx.json \
+            upstream-policy-sbom.spdx.json \
+            suse-policy.wasm
+
+      # ----------------------------------------------------------------------
       # 5. Publish the release
       # ----------------------------------------------------------------------
 
@@ -313,11 +387,25 @@ jobs:
           gh release create "$UPSTREAM_TAG" \
             --title "$UPSTREAM_TAG" \
             --notes-file release-notes.md \
-            --latest \
+            --latest=false \
             suse-policy.wasm \
             policy-sbom.spdx.json \
             policy-sbom.spdx.jsonl.bundle.sigstore \
+            upstream-policy-sbom.spdx.json \
+            upstream-policy-sbom.spdx.jsonl.bundle.sigstore \
             policy-signature.bundle.json
+
+      - name: Check that the SBOM download location resolves
+        run: |
+          set -euo pipefail
+          # The only claim in the SUSE SBOM that cannot be checked before the
+          # release exists. Everything else is covered by verify-sbom.sh.
+          URL=$(jq -r '.packages[0].downloadLocation' policy-sbom.spdx.json)
+          if ! curl -sfIL --retry 3 --retry-delay 2 -o /dev/null "$URL"; then
+            echo "::error::The downloadLocation recorded in the SBOM does not resolve: ${URL}"
+            exit 1
+          fi
+          echo "downloadLocation resolves: ${URL}"
 
       - name: Summarise
         env:
@@ -332,4 +420,7 @@ jobs:
             echo "| Verified upstream digest | \`${UPSTREAM_DIGEST}\` |"
             echo "| Published artifact | \`${DEST_OCI_REF}\` |"
             echo "| Release | ${UPSTREAM_TAG} |"
+            echo "| Upstream SBOM sha256 | \`$(sha256sum upstream-policy-sbom.spdx.json | cut -d' ' -f1)\` |"
+            echo "| SUSE SBOM sha256 | \`$(sha256sum policy-sbom.spdx.json | cut -d' ' -f1)\` |"
+            echo "| SUSE SBOM namespace | \`$(jq -r .documentNamespace policy-sbom.spdx.json)\` |"
           } >> "$GITHUB_STEP_SUMMARY"
