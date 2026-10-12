@@ -377,6 +377,48 @@ check "rejects metadata that records another digest" \
   "rejected" "$(repackaged_check "$WORKDIR/wrong-digest.yml")"
 
 # ---------------------------------------------------------------------------
+echo "changelog rendering"
+# ---------------------------------------------------------------------------
+
+cat > "$WORKDIR/body.md" <<'MARKDOWN'
+- chore(deps): update the SDK (#582)
+- fix: handle the empty case (#577) thanks @viccuad
+- feat: see also kubewarden/policy-server#99
+- docs: https://example.com/page#anchor and user@example.com
+MARKDOWN
+
+POLICY_NAME=pod-privileged-policy \
+POLICY_ID=pod-privileged \
+POLICY_VERSION=1.0.13 \
+UPSTREAM_TAG=pod-privileged-policy/v1.0.13 \
+UPSTREAM_RELEASE_URL=https://example.com/release \
+UPSTREAM_DIGEST=sha256:cafe \
+DEST_OCI_REF=ghcr.io/rancher/suse-security-policies/pod-privileged:v1.0.13 \
+UPSTREAM_SOURCE_COMMIT=8635d6072fc82ccf1421ca93cbd893ffe2bc7327 \
+UPSTREAM_SOURCE_SHA256=feedface \
+  ./hack/render-changelog.sh "$WORKDIR/body.md" > "$WORKDIR/notes.md"
+
+notes=$(cat "$WORKDIR/notes.md")
+
+contains() {
+  if grep -qF "$2" <<<"$notes"; then ok "$1"; else ko "$1"; fi
+}
+excludes() {
+  if grep -qF "$2" <<<"$notes"; then ko "$1"; else ok "$1"; fi
+}
+
+contains "qualifies bare pull request references" "(kubewarden/policies#582)"
+# shellcheck disable=SC2016 # the backticks are literal Markdown, not a subshell
+contains "escapes mentions" '`@viccuad`'
+contains "leaves already qualified references alone" "kubewarden/policy-server#99"
+contains "leaves URL fragments alone" "https://example.com/page#anchor"
+contains "leaves email addresses alone" "user@example.com"
+excludes "does not double qualify references" "kubewarden/policies#kubewarden"
+contains "links the source archive to its upstream commit" \
+  "(https://github.com/kubewarden/policies/tree/8635d6072fc82ccf1421ca93cbd893ffe2bc7327)"
+contains "records the sha256 of the source archive" "sha256 \`feedface\`"
+
+# ---------------------------------------------------------------------------
 echo "sbom generation"
 # ---------------------------------------------------------------------------
 
