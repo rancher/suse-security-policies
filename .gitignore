@@ -1,0 +1,14 @@
+# Artifacts produced by a local repackaging run
+*.wasm
+*-metadata.yml
+*-metadata.yaml
+discover-releases.json
+policy-sbom.spdx.json
+policy-sbom.spdx.jsonl.bundle.sigstore
+upstream-policy-sbom.spdx.json
+upstream-policy-sbom.spdx.jsonl.bundle.sigstore
+suse-policy.wasm.bundle.sigstore
+release-notes.md
+upstream-body.md
+upstream-sbom/
+upstream-source.tar.gz

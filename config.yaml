@@ -1,0 +1,92 @@
+# Configuration for the upstream policy repackaging pipeline.
+#
+# This repository does not hold any policy source code. It consumes the
+# releases published by the upstream repository, verifies them, adapts their
+# metadata and SBOM to SUSE, re-signs everything with this repository's own
+# identity and republishes the result.
+
+upstream:
+  # Repository that publishes the policies we repackage.
+  repository: kubewarden/policies
+
+  # OCI registry namespace where the upstream signed Wasm modules live.
+  # The full reference is "<registry>/<policy-id>:v<version>".
+  registry: ghcr.io/kubewarden/policies
+
+  # Sigstore identity expected on the upstream artifacts. "{tag}" is replaced
+  # with the release tag (for example "pod-privileged-policy/v1.0.13") so that
+  # the identity is pinned to the exact release being repackaged instead of
+  # accepting anything signed by the upstream repository.
+  #
+  # The value is a literal string, not a regular expression. The workflow
+  # compares it with "cosign --certificate-identity", which requires an exact
+  # match. Thus no character of the tag needs escaping.
+  certificate_identity_template: "https://github.com/kubewarden/policies/.github/workflows/release.yml@refs/tags/{tag}"
+  certificate_oidc_issuer: https://token.actions.githubusercontent.com
+
+destination:
+  # OCI registry namespace that receives the repackaged modules.
+  # Keep this in sync with the "io.kubewarden.policy.ociUrl" annotation below.
+  registry: ghcr.io/rancher/suse-security-policies
+
+# Annotation values applied to every repackaged policy. "ociUrl" is derived
+# from destination.registry and the policy id, so it is not listed here.
+# "io.kubewarden.policy.source" is not listed either. It tells where the
+# source code of the policy is, and this repository holds no source code, so
+# the annotation keeps the upstream value.
+metadata:
+  # SUSE publishes the repackaged policy. The upstream author is kept in the
+  # "com.suse.policy.upstream.author" annotation.
+  author: "SUSE <containers@suse.com>"
+  url: https://github.com/rancher/suse-security-policies
+
+# Every release carries two SBOMs. The upstream document is republished
+# byte-identical, so it keeps verifying against the upstream Sigstore identity.
+# The values below describe the second document, which this pipeline generates
+# from scratch to describe the artifact we actually ship.
+sbom:
+  # Base URI used to build the SPDX documentNamespace. A namespace must be
+  # unique per document, so a uuid4 is appended at generation time.
+  namespace_base: https://github.com/rancher/suse-security-policies/spdx
+  # SPDX separates the party that distributes an artifact from the party that
+  # created its content. We are the supplier, upstream is the originator.
+  supplier: "Organization: SUSE"
+  originator: "Organization: Kubewarden (cncf-kubewarden-maintainers@lists.cncf.io)"
+  # Recorded in creationInfo.creators as "Tool: <tool_name>-<commit sha>", so a
+  # document can always be traced back to the generator that produced it.
+  tool_name: suse-security-policies
+
+# Policies that upstream builds but does not publish to ArtifactHub or the
+# policy catalog. They are demos, test fixtures or internal helpers, so there
+# is nothing for us to repackage. Mirrors EXCLUDED_FROM_PUBLISHING in the
+# upstream release workflow.
+excluded_policies:
+  - context-aware-demo
+  - go-wasi-context-aware-test-policy
+  - raw-mutation-policy
+  - raw-mutation-wasi-policy
+  - raw-validation-opa-policy
+  - raw-validation-policy
+  - raw-validation-wasi-policy
+  - sleeping-policy
+
+# "yq", "jq" and "gh" are preinstalled on the GitHub hosted runner images, so
+# they are not pinned here. "cosign" is pinned through the action SHA in the
+# install-dependencies composite action.
+tools:
+  # kwctl 1.39 is the first version of kwctl that does two things. "annotate"
+  # replaces the metadata section of a module that has one. "annotate" also
+  # changes single annotations in the metadata of the module. This version is
+  # a release candidate. When v1.39.0 is released, use v1.39.0.
+  kwctl:
+    version: v1.39.0-rc.1
+    # sha256 of kwctl-linux-x86_64.zip for the version above.
+    checksum: 5f91372672e3098b8041f9db9e3f44382955123a24777b1671639704b4af5161
+  # sbom-utility validates the generated SPDX document before it is signed.
+  # It carries the SPDX 2.3 schema internally, so no schema has to be vendored
+  # here. The project publishes only md5 sums, so the value below was computed
+  # from the released archive.
+  sbom_utility:
+    version: 0.19.2
+    # sha256 of sbom-utility-v0.19.2-linux-amd64.tar.gz
+    checksum: e0cd37e6e67b1d0e44dbb7b38e055a4e2ee66db590bb8e7f89e2d9b650f4490b
