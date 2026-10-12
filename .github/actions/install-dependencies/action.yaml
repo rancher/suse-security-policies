@@ -1,0 +1,74 @@
+name: "Install repackaging dependencies"
+description: "Install the binaries needed to verify, repackage and sign upstream policies"
+branding:
+  icon: "package"
+  color: "blue"
+runs:
+  using: "composite"
+  steps:
+    - name: Install cosign
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+    - name: Read the pinned tool versions
+      id: versions
+      shell: bash
+      run: |
+        set -euo pipefail
+        {
+          echo "kwctl=$(yq -r '.tools.kwctl.version' config.yaml)"
+          echo "kwctl-checksum=$(yq -r '.tools.kwctl.checksum' config.yaml)"
+          echo "sbom-utility=$(yq -r '.tools.sbom_utility.version' config.yaml)"
+          echo "sbom-utility-checksum=$(yq -r '.tools.sbom_utility.checksum' config.yaml)"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Install kwctl
+      shell: bash
+      env:
+        KWCTL_VERSION: ${{ steps.versions.outputs.kwctl }}
+        KWCTL_CHECKSUM: ${{ steps.versions.outputs.kwctl-checksum }}
+      run: |
+        set -euo pipefail
+
+        ASSET="kwctl-linux-x86_64"
+        INSTALL_DIR="$HOME/.kwctl"
+
+        mkdir -p "$INSTALL_DIR"
+        curl -fsSL "https://github.com/kubewarden/adm-controller/releases/download/${KWCTL_VERSION}/${ASSET}.zip" \
+          -o "$INSTALL_DIR/$ASSET.zip"
+        echo "${KWCTL_CHECKSUM}  $INSTALL_DIR/$ASSET.zip" | sha256sum -c -
+        unzip -o "$INSTALL_DIR/$ASSET.zip" -d "$INSTALL_DIR"
+        rm "$INSTALL_DIR/$ASSET.zip"
+
+        mv "$INSTALL_DIR/$ASSET" "$INSTALL_DIR/kwctl"
+        chmod 755 "$INSTALL_DIR/kwctl"
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+
+    - name: Install sbom-utility
+      shell: bash
+      env:
+        SBOM_UTILITY_VERSION: ${{ steps.versions.outputs.sbom-utility }}
+        SBOM_UTILITY_CHECKSUM: ${{ steps.versions.outputs.sbom-utility-checksum }}
+      run: |
+        set -euo pipefail
+
+        ASSET="sbom-utility-v${SBOM_UTILITY_VERSION}-linux-amd64"
+        INSTALL_DIR="$HOME/.sbom-utility"
+
+        mkdir -p "$INSTALL_DIR"
+        curl -fsSL "https://github.com/CycloneDX/sbom-utility/releases/download/v${SBOM_UTILITY_VERSION}/${ASSET}.tar.gz" \
+          -o "$INSTALL_DIR/sbom-utility.tar.gz"
+        echo "${SBOM_UTILITY_CHECKSUM}  $INSTALL_DIR/sbom-utility.tar.gz" | sha256sum -c -
+        # The archive has no top level directory, it extracts the binary and
+        # its default configuration side by side.
+        tar xzf "$INSTALL_DIR/sbom-utility.tar.gz" -C "$INSTALL_DIR"
+        rm "$INSTALL_DIR/sbom-utility.tar.gz"
+
+        chmod 755 "$INSTALL_DIR/sbom-utility"
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+
+    - name: Show the tool versions
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$HOME/.kwctl/kwctl" --version
+        "$HOME/.sbom-utility/sbom-utility" version
