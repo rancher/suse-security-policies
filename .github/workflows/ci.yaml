@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Check the shell scripts
+        run: shellcheck hack/*.sh
+
+      - name: Check that config.yaml is valid
+        run: |
+          set -euo pipefail
+          yq -e '.upstream.repository' config.yaml > /dev/null
+          yq -e '.destination.registry' config.yaml > /dev/null
+          yq -e '.excluded_policies | length > 0' config.yaml > /dev/null
+          # Every one of these ends up in a signed SPDX document, so a missing
+          # value must fail here rather than produce a document with the string
+          # "null" in a provenance field.
+          for key in namespace_base supplier originator tool_name; do
+            yq -e ".sbom.${key}" config.yaml > /dev/null
+          done
+          for tool in kwctl sbom_utility; do
+            yq -e ".tools.${tool}.version" config.yaml > /dev/null
+            yq -e ".tools.${tool}.checksum" config.yaml > /dev/null
+          done
+          echo "config.yaml looks sane"
+
+  test:
+    name: Test the helper scripts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Run the script tests
+        run: ./hack/test-scripts.sh
