@@ -377,6 +377,296 @@ check "rejects metadata that records another digest" \
   "rejected" "$(repackaged_check "$WORKDIR/wrong-digest.yml")"
 
 # ---------------------------------------------------------------------------
+echo "sbom generation"
+# ---------------------------------------------------------------------------
+
+# Modelled on what upstream actually publishes: a single syft directory root
+# package, the upstream git commit in versionInfo and no licence data at all.
+# An invented fixture would hide the shape the generator has to cope with.
+cat > "$WORKDIR/upstream-sbom.json" <<'JSON'
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "pod-privileged-1.0.13",
+  "documentNamespace": "https://anchore.com/syft/dir/pod-privileged-1.0.13-7f488e6b-6b90-4d61-84ee-9b2dafa39547",
+  "creationInfo": {
+    "created": "2026-09-17T20:34:22Z",
+    "creators": ["Organization: Anchore, Inc", "Tool: syft-1.28.0"]
+  },
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-DocumentRoot-Directory-pod-privileged-1.0.13",
+      "name": "pod-privileged-1.0.13",
+      "versionInfo": "9249cc8dc50acd480a7395181fcaa1f0f7ac0a75",
+      "supplier": "NOASSERTION",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "primaryPackagePurpose": "FILE"
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relatedSpdxElement": "SPDXRef-DocumentRoot-Directory-pod-privileged-1.0.13",
+      "relationshipType": "DESCRIBES"
+    }
+  ]
+}
+JSON
+
+printf 'not really a wasm module' > "$WORKDIR/suse-policy.wasm"
+
+DEST_REF="ghcr.io/rancher/suse-security-policies/pod-privileged@sha256:1111222233334444"
+
+generate_sbom() {
+  POLICY_ID=pod-privileged \
+  POLICY_VERSION=1.0.13 \
+  UPSTREAM_TAG=pod-privileged-policy/v1.0.13 \
+  UPSTREAM_REPOSITORY=kubewarden/policies \
+  UPSTREAM_DIGEST=sha256:aaaabbbbccccdddd \
+  WASM_FILE="$WORKDIR/suse-policy.wasm" \
+  WASM_ASSET_NAME=suse-policy.wasm \
+  DEST_IMMUTABLE_REF="$DEST_REF" \
+  GITHUB_REPOSITORY=rancher/suse-security-policies \
+  GITHUB_SHA=0123456789abcdef \
+    ./hack/generate-sbom.sh "$1" "$2"
+}
+
+generate_sbom "$WORKDIR/upstream-sbom.json" "$WORKDIR/suse-sbom.json" 2> /dev/null
+
+suse_sbom() { jq -r "$1" "$WORKDIR/suse-sbom.json"; }
+
+upstream_sha256=$(sha256sum "$WORKDIR/upstream-sbom.json" | cut -d' ' -f1)
+wasm_sha256=$(sha256sum "$WORKDIR/suse-policy.wasm" | cut -d' ' -f1)
+
+check "names the document after the policy and version" \
+  "pod-privileged-1.0.13" "$(suse_sbom .name)"
+
+check "builds the namespace from the configured base" \
+  "true" \
+  "$(suse_sbom '.documentNamespace | startswith("https://github.com/rancher/suse-security-policies/spdx/pod-privileged/1.0.13-")')"
+
+# The namespace must be unique per document, so two runs must not collide.
+generate_sbom "$WORKDIR/upstream-sbom.json" "$WORKDIR/suse-sbom-again.json" 2> /dev/null
+check "gives every generated document a fresh namespace" \
+  "false" \
+  "$(jq -r --slurpfile a "$WORKDIR/suse-sbom-again.json" \
+     '.documentNamespace == $a[0].documentNamespace' "$WORKDIR/suse-sbom.json")"
+
+check "credits SUSE and the generator commit" \
+  '["Organization: SUSE","Tool: suse-security-policies-0123456789abcdef"]' \
+  "$(jq -c '.creationInfo.creators' "$WORKDIR/suse-sbom.json")"
+
+check "references the upstream document by namespace" \
+  "https://anchore.com/syft/dir/pod-privileged-1.0.13-7f488e6b-6b90-4d61-84ee-9b2dafa39547" \
+  "$(suse_sbom '.externalDocumentRefs[0].spdxDocument')"
+
+check "binds the upstream reference with its sha256" \
+  "$upstream_sha256" \
+  "$(suse_sbom '.externalDocumentRefs[0].checksum.checksumValue')"
+
+check "records the sha256 of the module it describes" \
+  "$wasm_sha256" \
+  "$(suse_sbom '.packages[0].checksums[0].checksumValue')"
+
+check "describes exactly one package" "1" "$(suse_sbom '.packages | length')"
+
+check "marks the package as an application" \
+  "APPLICATION" "$(suse_sbom '.packages[0].primaryPackagePurpose')"
+
+check "does not claim to have analysed the files" \
+  "false" "$(suse_sbom '.packages[0].filesAnalyzed')"
+
+# SPDX separates the party that distributes an artifact from the party that
+# created its content. Getting these the wrong way round would credit SUSE
+# with work it did not do.
+check "names SUSE as the supplier" \
+  "Organization: SUSE" "$(suse_sbom '.packages[0].supplier')"
+
+check "names Kubewarden as the originator" \
+  "true" \
+  "$(suse_sbom '.packages[0].originator | startswith("Organization: Kubewarden")')"
+
+check "points the purl at the pushed artifact" \
+  "pkg:oci/pod-privileged@sha256:1111222233334444?repository_url=ghcr.io/rancher/suse-security-policies" \
+  "$(suse_sbom '.packages[0].externalRefs[0].referenceLocator')"
+
+check "points downloadLocation at the release asset" \
+  "https://github.com/rancher/suse-security-policies/releases/download/pod-privileged-policy/v1.0.13/suse-policy.wasm" \
+  "$(suse_sbom '.packages[0].downloadLocation')"
+
+# The upstream git commit is the most precise provenance upstream publishes,
+# and it only exists in the versionInfo of its root package.
+check "carries the upstream source commit" \
+  "true" \
+  "$(suse_sbom '.packages[0].sourceInfo | contains("9249cc8dc50acd480a7395181fcaa1f0f7ac0a75")')"
+
+check "carries the upstream oci digest" \
+  "true" \
+  "$(suse_sbom '.packages[0].sourceInfo | contains("sha256:aaaabbbbccccdddd")')"
+
+# The module is not rebuilt, but the metadata section is replaced. Claiming it
+# is unmodified without that qualifier would contradict the workflow.
+check "does not claim the module is untouched" \
+  "true" \
+  "$(suse_sbom '.packages[0].sourceInfo | contains("io.kubewarden.metadata custom section was replaced")')"
+
+check "copies the upstream licence conclusion" \
+  "NOASSERTION NOASSERTION NOASSERTION" \
+  "$(suse_sbom '[.packages[0].licenseConcluded, .packages[0].licenseDeclared, .packages[0].copyrightText] | join(" ")')"
+
+# Licences are repeated, never asserted. If upstream ever concludes one, the
+# repackaged document has to follow instead of staying at NOASSERTION.
+jq '.packages[0].licenseConcluded = "Apache-2.0" | .packages[0].licenseDeclared = "Apache-2.0"' \
+  "$WORKDIR/upstream-sbom.json" > "$WORKDIR/licensed-upstream.json"
+generate_sbom "$WORKDIR/licensed-upstream.json" "$WORKDIR/licensed-suse.json" 2> /dev/null
+check "follows upstream when it does conclude a licence" \
+  "Apache-2.0" \
+  "$(jq -r '.packages[0].licenseConcluded' "$WORKDIR/licensed-suse.json")"
+
+check "describes the package it generated" \
+  "SPDXRef-Package-pod-privileged" \
+  "$(suse_sbom '.relationships[] | select(.relationshipType == "DESCRIBES") | .relatedSpdxElement')"
+
+check "links the package back to the upstream root package" \
+  "DocumentRef-upstream:SPDXRef-DocumentRoot-Directory-pod-privileged-1.0.13" \
+  "$(suse_sbom '.relationships[] | select(.relationshipType == "GENERATED_FROM") | .relatedSpdxElement')"
+
+# The whole point of the two document split: the file we republish has to stay
+# the one upstream signed.
+check "leaves the upstream document untouched" \
+  "$upstream_sha256" \
+  "$(sha256sum "$WORKDIR/upstream-sbom.json" | cut -d' ' -f1)"
+
+generation_fails() {
+  if generate_sbom "$1" "$WORKDIR/unused.json" > /dev/null 2>&1; then
+    echo "generated"
+  else
+    echo "failed"
+  fi
+}
+
+# A GENERATED_FROM relationship has to point at exactly one element. Guessing
+# a root would make the document claim a provenance nobody checked.
+jq '.relationships = []' "$WORKDIR/upstream-sbom.json" > "$WORKDIR/no-root.json"
+check "fails when the upstream document describes nothing" \
+  "failed" "$(generation_fails "$WORKDIR/no-root.json")"
+
+jq '.relationships += [{
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relatedSpdxElement": "SPDXRef-Other",
+      "relationshipType": "DESCRIBES"
+    }]' "$WORKDIR/upstream-sbom.json" > "$WORKDIR/two-roots.json"
+check "fails when the upstream document describes more than one package" \
+  "failed" "$(generation_fails "$WORKDIR/two-roots.json")"
+
+jq 'del(.documentNamespace)' "$WORKDIR/upstream-sbom.json" > "$WORKDIR/no-namespace.json"
+check "fails when the upstream document cannot be referenced" \
+  "failed" "$(generation_fails "$WORKDIR/no-namespace.json")"
+
+# The legacy documentDescribes form is still accepted, because the shape
+# depends on the tool that produced the SBOM.
+jq 'del(.relationships) | .documentDescribes = ["SPDXRef-DocumentRoot-Directory-pod-privileged-1.0.13"]' \
+  "$WORKDIR/upstream-sbom.json" > "$WORKDIR/legacy.json"
+generate_sbom "$WORKDIR/legacy.json" "$WORKDIR/legacy-suse.json" 2> /dev/null
+check "accepts the legacy documentDescribes form" \
+  "DocumentRef-upstream:SPDXRef-DocumentRoot-Directory-pod-privileged-1.0.13" \
+  "$(jq -r '.relationships[] | select(.relationshipType == "GENERATED_FROM") | .relatedSpdxElement' \
+     "$WORKDIR/legacy-suse.json")"
+
+# ---------------------------------------------------------------------------
+echo "sbom verification"
+# ---------------------------------------------------------------------------
+
+# sbom-utility is not on a developer machine by default, so these tests skip
+# the schema check explicitly. The release workflow installs the pinned binary
+# and runs the check.
+verify_sbom() {
+  local suse="${1:-$WORKDIR/suse-sbom.json}"
+  local upstream="${2:-$WORKDIR/upstream-sbom.json}"
+  local wasm="${3:-$WORKDIR/suse-policy.wasm}"
+  local ref="${4:-$DEST_REF}"
+
+  if SKIP_SCHEMA_CHECK=true \
+     POLICY_ID=pod-privileged \
+     DEST_IMMUTABLE_REF="$ref" \
+       ./hack/verify-sbom.sh "$suse" "$upstream" "$wasm" > /dev/null 2>&1; then
+    echo "accepted"
+  else
+    echo "rejected"
+  fi
+}
+
+check "accepts the document it generated" "accepted" "$(verify_sbom)"
+
+printf 'a different module' > "$WORKDIR/tampered.wasm"
+check "rejects a module that is not the one described" \
+  "rejected" "$(verify_sbom "" "" "$WORKDIR/tampered.wasm")"
+
+jq '.name = "tampered"' "$WORKDIR/upstream-sbom.json" > "$WORKDIR/tampered-upstream.json"
+check "rejects an upstream document that is not the referenced one" \
+  "rejected" "$(verify_sbom "" "$WORKDIR/tampered-upstream.json")"
+
+check "rejects a document that points at another digest" \
+  "rejected" \
+  "$(verify_sbom "" "" "" "ghcr.io/rancher/suse-security-policies/pod-privileged@sha256:9999")"
+
+jq '.packages[0].checksums[0].checksumValue = "0000"' \
+  "$WORKDIR/suse-sbom.json" > "$WORKDIR/wrong-checksum.json"
+check "rejects a document whose package checksum was edited" \
+  "rejected" "$(verify_sbom "$WORKDIR/wrong-checksum.json")"
+
+jq '.relationships = [ .relationships[]
+      | select(.relationshipType == "GENERATED_FROM")
+      | .relatedSpdxElement = "DocumentRef-upstream:SPDXRef-Missing" ]
+    + [ .relationships[] | select(.relationshipType == "DESCRIBES") ]' \
+  "$WORKDIR/suse-sbom.json" > "$WORKDIR/dangling.json"
+check "rejects a provenance link that does not resolve upstream" \
+  "rejected" "$(verify_sbom "$WORKDIR/dangling.json")"
+
+jq '.externalDocumentRefs[0].spdxDocument = "https://example.com/other"' \
+  "$WORKDIR/suse-sbom.json" > "$WORKDIR/wrong-namespace.json"
+check "rejects a reference to a different upstream namespace" \
+  "rejected" "$(verify_sbom "$WORKDIR/wrong-namespace.json")"
+
+# A PATH with only the tools verify-sbom.sh needs, and no sbom-utility. In the
+# release workflow, a missing binary means the installation broke, so the
+# check must fail instead of skipping the schema validation.
+mkdir -p "$WORKDIR/no-sbom-utility"
+for tool in jq sha256sum cut basename; do
+  ln -s "$(command -v "$tool")" "$WORKDIR/no-sbom-utility/$tool"
+done
+check "rejects the document when sbom-utility is missing" \
+  "rejected" \
+  "$(if PATH="$WORKDIR/no-sbom-utility" \
+       POLICY_ID=pod-privileged \
+       DEST_IMMUTABLE_REF="$DEST_REF" \
+       "$BASH" ./hack/verify-sbom.sh "$WORKDIR/suse-sbom.json" \
+         "$WORKDIR/upstream-sbom.json" "$WORKDIR/suse-policy.wasm" > /dev/null 2>&1; then
+       echo accepted
+     else
+       echo rejected
+     fi)"
+
+check "accepts the document when the schema check is skipped explicitly" \
+  "accepted" \
+  "$(if PATH="$WORKDIR/no-sbom-utility" \
+       SKIP_SCHEMA_CHECK=true \
+       POLICY_ID=pod-privileged \
+       DEST_IMMUTABLE_REF="$DEST_REF" \
+       "$BASH" ./hack/verify-sbom.sh "$WORKDIR/suse-sbom.json" \
+         "$WORKDIR/upstream-sbom.json" "$WORKDIR/suse-policy.wasm" > /dev/null 2>&1; then
+       echo accepted
+     else
+       echo rejected
+     fi)"
+
+
+# ---------------------------------------------------------------------------
 echo
 echo "passed: ${passed}, failed: ${failed}"
 [[ "$failed" -eq 0 ]]
