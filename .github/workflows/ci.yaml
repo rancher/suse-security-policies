@@ -49,6 +49,9 @@ jobs:
       - name: Check the workflows
         run: make actionlint
 
+      - name: Check that the tool pins match
+        run: make check-pins
+
       - name: Check that config.yaml is valid
         run: make check-config
 

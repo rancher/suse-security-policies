@@ -128,6 +128,31 @@ vulncheck: $(GOVULNCHECK)
 check-config: build
 	$(BINARY) check-config
 
+# The installer actions in the sync workflow read their own copy of these two
+# pins. Renovate updates both copies, but a manual edit or a partial merge can
+# change only one.
+SYNC_WORKFLOW := .github/workflows/sync-upstream-releases.yaml
+
+.PHONY: check-pins
+check-pins:
+	@status=0; \
+	for pin in KWCTL_VERSION=$(KWCTL_VERSION) COSIGN_VERSION=$(COSIGN_VERSION); do \
+		name="$${pin%%=*}"; \
+		want="$${pin#*=}"; \
+		got="$$(awk -v name="$$name" '$$1 == name ":" { gsub(/["\047]/, "", $$2); print $$2 }' $(SYNC_WORKFLOW) | sort -u)"; \
+		if [ -z "$$got" ]; then \
+			echo "$(SYNC_WORKFLOW) has no value for $$name. The Makefile pins $$want." >&2; \
+			status=1; \
+		elif [ "$$(printf '%s\n' "$$got" | wc -l)" -gt 1 ]; then \
+			echo "$(SYNC_WORKFLOW) pins $$name to different values: $$(echo $$got). The Makefile pins $$want. Change all pins to the same version." >&2; \
+			status=1; \
+		elif [ "$$got" != "$$want" ]; then \
+			echo "$(SYNC_WORKFLOW) pins $$name to $$got, but the Makefile pins $$want. Change both pins to the same version." >&2; \
+			status=1; \
+		fi; \
+	done; \
+	exit $$status
+
 .PHONY: tools
 tools: $(TOOLS)
 

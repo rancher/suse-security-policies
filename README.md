@@ -724,6 +724,7 @@ make vet           # runs go vet
 make lint          # runs golangci-lint
 make actionlint    # checks the workflows, with shellcheck
 make check-config  # runs repackager check-config
+make check-pins    # fails if the Makefile and the workflow pin different kwctl or cosign versions
 make mod-check     # fails if go mod tidy would change go.mod or go.sum
 make vulncheck     # runs govulncheck, which needs network access
 make tools         # installs every tool into bin/
@@ -844,7 +845,9 @@ The `Makefile` pins the version of each tool, and the sha256 of its release
 asset. The workflow `sync-upstream-releases.yaml` also pins the versions of
 kwctl and cosign, in the `KWCTL_VERSION` and `COSIGN_VERSION` variables of the
 `repackage` job. The installer actions and the version check read these
-variables. For the `Makefile`, Renovate updates each version and its checksum
+variables. The two pins of each tool must be equal. The CI runs
+`make check-pins` on each pull request. It fails if the two pins are not
+equal. For the `Makefile`, Renovate updates each version and its checksum
 in the same pull request. A `# renovate:` comment on the line above each value
 tells Renovate where the tool comes from:
 
