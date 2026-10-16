@@ -195,6 +195,15 @@ func TestRepackage(t *testing.T) {
 	}
 	draftCheck := "the check of the draft release " + testTag + " failed"
 	afterCheck := "is published and immutable"
+	cleanupFailed := "cannot delete one or more old drafts for the tag"
+	deleteCmd := "gh api --hostname github.com -X DELETE "
+	notFound := "gh: Not Found (HTTP 404)"
+	// oldDraft gives the rules for a list after the publication that shows the
+	// old draft 7. The parameter draft is the state of release 7 at the second read.
+	oldDraft := func(draft bool) []rule {
+		return []rule{{prefix: ownList, out: `[[{"tag_name":"` + testTag + `","draft":true,"id":7}]]`, once: true},
+			{prefix: ownRepo + "releases/7", fn: release(7, draft, nil)}}
+	}
 	otherDigest := "sha256:" + strings.Repeat("f", 64)
 	// published gives the rules of a draft that passes its check, but changes
 	// when it is published.
@@ -215,6 +224,7 @@ func TestRepackage(t *testing.T) {
 		sequence []string
 		calls    int    // if not 0, the exact number of calls
 		stdout   string // if not empty, stdout must contain it
+		noStdout string // if not empty, stdout must not contain it
 		noCalls  bool   // no command may run
 	}{
 		{name: "dry run", dryRun: true, rules: freshRules(), forbid: append(signOrPublish, "cosign sign-blob")},
@@ -256,24 +266,59 @@ func TestRepackage(t *testing.T) {
 			wantErr: "holds another module", forbid: signOrPublish},
 		{name: "stale draft", rules: append([]rule{
 			{prefix: ownList, out: `[[{"tag_name":"` + testTag + `","draft":true,"id":7},{"tag_name":"other/v1.0.0","draft":true,"id":9}]]`, once: true},
-			{prefix: "gh api --hostname github.com -X DELETE ", out: ""},
-		}, rerunRules()...), want: []string{"gh api --hostname github.com -X DELETE repos/rancher/suse-security-policies/releases/7"},
-			forbid: []string{"releases/9", "-X PATCH repos/rancher/suse-security-policies/releases/7"}},
+			{prefix: ownRepo + "releases/7", fn: release(7, true, nil)},
+			{prefix: deleteCmd, out: ""},
+		}, rerunRules()...), want: []string{deleteCmd + "repos/rancher/suse-security-policies/releases/7"},
+			forbid: []string{"releases/9", "-X PATCH repos/rancher/suse-security-policies/releases/7"},
+			before: map[string]string{"-X PATCH": deleteCmd, ownList: ownRepo + "releases/7", ownRepo + "releases/7": deleteCmd}},
+		{name: "old draft published before the second read", rules: append(oldDraft(false), rerunRules()...),
+			want: []string{ownRepo + "releases/7"}, forbid: []string{deleteCmd}},
+		{name: "own release in the list after the publication", rules: append([]rule{
+			{prefix: ownList, out: `[[{"tag_name":"` + testTag + `","draft":true,"id":42}]]`, once: true},
+		}, rerunRules()...), want: []string{ownList}, forbid: []string{deleteCmd}, count: map[string]int{ownRepo + "releases/42": 2}},
+		{name: "old draft moved to another tag before the second read", rules: append([]rule{
+			{prefix: ownList, out: `[[{"tag_name":"` + testTag + `","draft":true,"id":7}]]`, once: true},
+			{prefix: ownRepo + "releases/7", fn: release(7, true, func(rel map[string]any, _ []map[string]any) { rel["tag_name"] = "other/v1.0.0" })},
+		}, rerunRules()...), want: []string{ownRepo + "releases/7"}, forbid: []string{deleteCmd}, noStdout: cleanupFailed},
+		{name: "second read of an old draft fails", rules: append([]rule{
+			{prefix: ownList, out: `[[{"tag_name":"` + testTag + `","draft":true,"id":7}]]`, once: true},
+			{prefix: ownRepo + "releases/7", err: "gh: Server Error (HTTP 502)"},
+		}, rerunRules()...), want: []string{ownRepo + "releases/7"}, forbid: []string{deleteCmd}, stdout: cleanupFailed},
+		{name: "old draft gone before the second read", rules: append([]rule{
+			{prefix: ownList, out: `[[{"tag_name":"` + testTag + `","draft":true,"id":7}]]`, once: true},
+			{prefix: ownRepo + "releases/7", err: notFound},
+		}, rerunRules()...), want: []string{ownRepo + "releases/7"}, forbid: []string{deleteCmd}, noStdout: cleanupFailed},
+		{name: "old draft gone before the deletion", rules: append(append(oldDraft(true), rule{prefix: deleteCmd, err: notFound}), rerunRules()...),
+			want: []string{deleteCmd + "repos/rancher/suse-security-policies/releases/7"}, noStdout: cleanupFailed},
+		{name: "list after the publication with a string id and a published release", rules: append([]rule{
+			{prefix: ownList, out: `[[{"tag_name":"` + testTag + `","draft":true,"id":"7"},{"tag_name":"` + testTag + `","draft":false,"id":8}]]`, once: true},
+		}, rerunRules()...), want: []string{ownList}, forbid: []string{deleteCmd, "releases/7", "releases/8"}, noStdout: cleanupFailed},
+		{name: "deletion of an old draft fails", rules: append(append(oldDraft(true), rule{prefix: deleteCmd, err: "gh: Server Error (HTTP 502)"}), rerunRules()...),
+			want: []string{deleteCmd + "repos/rancher/suse-security-policies/releases/7"}, stdout: cleanupFailed},
+		{name: "list after the publication fails", rules: append([]rule{{prefix: ownList, err: "gh: Server Error (HTTP 502)", once: true}}, rerunRules()...),
+			want: []string{ownList}, forbid: []string{deleteCmd}, stdout: cleanupFailed},
+		{name: "no deletion after a failed check", rules: append(append(oldDraft(true), rule{prefix: deleteCmd, out: ""}),
+			published(func(_ map[string]any, assets []map[string]any) { assets[0]["digest"] = otherDigest })...),
+			wantErr: afterCheck, forbid: []string{ownList, deleteCmd, ownRepo + "releases/7"}},
 		{name: "publish the created draft", rules: rerunRules(),
 			want:   append([]string{"gh api --hostname github.com -X POST repos/rancher/suse-security-policies/releases -f tag_name=" + testTag + " -f target_commitish=" + testSHA + " -f name=" + testTag + " -F draft=true -f make_latest=false -F body=@$WORK/" + releaseNotesName + "\n"}, uploads...),
 			count:  map[string]int{ownUpload + "42/assets?name=": 7, "-X PATCH repos/rancher/suse-security-policies/releases/42 -F draft=false -f make_latest=false": 1, "-X PATCH": 1},
-			forbid: []string{"gh release create"}, before: map[string]string{ownUpload: "-X PATCH"},
+			forbid: []string{"gh release create", deleteCmd}, before: map[string]string{ownUpload: "-X PATCH", "-X PATCH": ownList},
 			sequence: []string{"?name=" + upstreamSBOMBundleName + " ", ownRepo + "releases/tags/" + testTag, ownRepo + "git/ref/tags/" + testTag, ownRepo + "releases/42",
 				"-X PATCH repos/rancher/suse-security-policies/releases/42 ", ownRepo + "releases/42", ownRepo + "git/ref/tags/" + testTag}},
-		// Another draft with the tag exists, but only the draft that the run created is published.
+		// Another draft with the tag exists, but only the draft that the run
+		// created is published. The run deletes the other draft after the publication.
 		{name: "publish by the id in the creation response", rules: append([]rule{
-			{prefix: ownList, out: `[[{"tag_name":"` + testTag + `","draft":true,"id":42}]]`, once: true},
-			{prefix: "gh api --hostname github.com -X DELETE ", out: ""},
+			{prefix: ownList, out: `[[{"tag_name":"` + testTag + `","draft":true,"id":42},{"tag_name":"` + testTag + `","draft":true,"id":43}]]`, once: true},
+			{prefix: deleteCmd, out: ""},
 			{prefix: ownCreate, out: created(43, true, testTag, strings.Replace(ownAssets, "/42/", "/43/", 1)+"{?name,label}")},
+			{prefix: ownRepo + "releases/42", fn: release(42, true, nil)},
 			{prefix: ownRepo + "releases/43", fn: release(43, true, nil), once: true},
 			{prefix: ownRepo + "releases/43", fn: release(43, false, nil)},
-		}, rerunRules()...), count: map[string]int{ownUpload + "43/assets?name=": 7, ownUpload + "42/": 0, ownRepo + "releases/42": 0,
-			ownRepo + "releases/43": 2, "-X PATCH repos/rancher/suse-security-policies/releases/43 ": 1, "-X PATCH": 1}},
+		}, rerunRules()...), count: map[string]int{ownUpload + "43/assets?name=": 7, ownUpload + "42/": 0, ownRepo + "releases/42": 1,
+			ownRepo + "releases/43": 2, "-X PATCH repos/rancher/suse-security-policies/releases/43 ": 1, "-X PATCH": 1,
+			deleteCmd + "repos/rancher/suse-security-policies/releases/42": 1, deleteCmd: 1},
+			before: map[string]string{"-X PATCH": deleteCmd}},
 		{name: "draft misses an asset", rules: append([]rule{draftRead(func(rel map[string]any, assets []map[string]any) { rel["assets"] = assets[1:] })}, rerunRules()...),
 			wantErr: `the asset "` + suseWasmName + `" is missing`, forbid: noPatch},
 		{name: "draft has an extra asset", rules: append([]rule{draftRead(func(rel map[string]any, assets []map[string]any) {
@@ -365,9 +410,6 @@ func TestRepackage(t *testing.T) {
 			sbom["creationInfo"].(map[string]any)["creators"] = []any{"Organization: SUSE", "Tool: suse-security-policies-" + testSHA}
 		})}}, rerunRules()...), wantErr: "differs from the release SBOM",
 			forbid: []string{"cosign sign", "cosign attest", ownCreate, ownUpload, "-X PATCH", "-X DELETE"}},
-		{name: "published release in the list", rules: append([]rule{
-			{prefix: ownList, out: `[[{"tag_name":"` + testTag + `","draft":false,"id":8}]]`, once: true},
-		}, rerunRules()...), wantErr: "is already published", forbid: []string{"-X DELETE", ownCreate, ownUpload}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -384,6 +426,9 @@ func TestRepackage(t *testing.T) {
 			stdout, err := execute(t, args...)
 			if !strings.Contains(stdout, tt.stdout) {
 				t.Errorf("stdout does not contain %q:\n%s", tt.stdout, stdout)
+			}
+			if tt.noStdout != "" && strings.Contains(stdout, tt.noStdout) {
+				t.Errorf("stdout contains %q:\n%s", tt.noStdout, stdout)
 			}
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("repackage failed: %v", err)

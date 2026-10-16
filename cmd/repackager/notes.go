@@ -41,10 +41,13 @@ func renderReleaseNotes(d *repackageData, destRef, body string) string {
 		"\n## Changelog\n\n" + rewriteChangelog(body, d.cfg.Upstream.Repository) + "\n"
 }
 
-func releaseSummary(d *repackageData, checkFailure string) string {
+func releaseSummary(d *repackageData, checkFailure, cleanupFailure string) string {
 	s := "### Repackaged " + d.tag + "\n\n"
 	if checkFailure != "" {
 		s += "> A check after the publication failed: " + strings.Join(strings.Fields(checkFailure), " ") + ". The release is published and immutable. Fix it by hand.\n\n"
+	}
+	if cleanupFailure != "" {
+		s += "> The release is published, but the run cannot delete one or more old drafts for the tag: " + strings.Join(strings.Fields(cleanupFailure), " ") + ". Delete them by hand.\n\n"
 	}
 	upstreamSum, _ := fileSHA256(d.path(upstreamSBOMName))
 	suseSum, _ := fileSHA256(d.path(suseSBOMName))

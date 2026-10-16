@@ -545,20 +545,8 @@ func publish(ctx context.Context, d *repackageData) error {
 		}
 		files[filepath.Base(a)] = releaseFile{info.Size(), sum}
 	}
-	releases, err := releasesOf(ctx, d.repo)
-	for _, r := range releases {
-		if str(r, "tag_name") != d.tag || err != nil {
-			continue
-		} else if get(r, "draft") != true {
-			return fmt.Errorf("the release %s is already published", d.tag)
-		}
-		_, err = githubAPI(ctx, "-X", "DELETE", fmt.Sprintf("repos/%s/releases/%.0f", d.repo, get(r, "id")))
-	}
-	var draft any
-	if err == nil {
-		draft, err = decode(githubAPI(ctx, "-X", "POST", "repos/"+d.repo+"/releases", "-f", "tag_name="+d.tag, "-f", "target_commitish="+d.sha,
-			"-f", "name="+d.tag, "-F", "draft=true", "-f", "make_latest=false", "-F", "body=@"+d.path(releaseNotesName)))
-	}
+	draft, err := decode(githubAPI(ctx, "-X", "POST", "repos/"+d.repo+"/releases", "-f", "tag_name="+d.tag, "-f", "target_commitish="+d.sha,
+		"-f", "name="+d.tag, "-F", "draft=true", "-f", "make_latest=false", "-F", "body=@"+d.path(releaseNotesName)))
 	if err != nil {
 		return err
 	}
@@ -622,15 +610,57 @@ func publish(ctx context.Context, d *repackageData) error {
 		}
 		err = errors.Join(checkRelease(rel, d, int64(id), files, false), noURL, wrongTag)
 	}
-	failure := ""
+	failure, cleanupFailure := "", ""
 	if err != nil {
 		failure = err.Error()
+	} else if err := deleteOldDrafts(ctx, d, int64(id)); err != nil {
+		// The run does not fail, because the release is correct and a rerun
+		// for a published release always stops.
+		cleanupFailure = err.Error()
+		logf("::warning::%s", escapeData(fmt.Sprintf("the release %s is published, but the run cannot delete one or more old drafts for the tag: %v", d.tag, err)))
 	}
-	if err := appendEnvFile("GITHUB_STEP_SUMMARY", cmdOut, releaseSummary(d, failure)); err != nil {
+	if err := appendEnvFile("GITHUB_STEP_SUMMARY", cmdOut, releaseSummary(d, failure, cleanupFailure)); err != nil {
 		logf("::warning::%s", escapeData(err.Error()))
 	}
 	if err != nil {
 		return fmt.Errorf("the release %s is published and immutable, but a check after the publication failed. A person must check and fix the release by hand: %w", d.tag, err)
 	}
 	return nil
+}
+
+// deleteOldDrafts deletes the drafts with the tag of d, except the release keep.
+//
+// deleteOldDrafts runs only after the publication. GitHub refuses to publish
+// a second release with a tag that has a published release, so after the
+// publication nobody can publish an old draft with the tag. The second read
+// finds a draft that a person published or moved to another tag. A small time
+// window stays between the read and the delete, because GitHub has no
+// conditional delete.
+func deleteOldDrafts(ctx context.Context, d *repackageData, keep int64) error {
+	releases, err := releasesOf(ctx, d.repo)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, r := range releases {
+		id, isNumber := get(r, "id").(float64)
+		if str(r, "tag_name") != d.tag || get(r, "draft") != true || !isNumber || id < 1 || id != math.Trunc(id) || id > 1<<53 || int64(id) == keep {
+			continue
+		}
+		path := fmt.Sprintf("repos/%s/releases/%d", d.repo, int64(id))
+		rel, err := decode(githubAPI(ctx, path))
+		if err == nil && (get(rel, "draft") != true || str(rel, "tag_name") != d.tag) {
+			logf("keep the release %d: it is no longer a draft with the tag %s", int64(id), d.tag)
+			continue
+		}
+		if err == nil {
+			_, err = githubAPI(ctx, "-X", "DELETE", path)
+		}
+		if err != nil && strings.Contains(err.Error(), "HTTP 404") {
+			logf("the release %d is already gone", int64(id))
+		} else if err != nil {
+			errs = append(errs, fmt.Errorf("release %d: %w", int64(id), err))
+		}
+	}
+	return errors.Join(errs...)
 }

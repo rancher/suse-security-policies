@@ -83,10 +83,10 @@ signing and distribution problems here.
   release, `sbom-utility` makes sure that the SUSE SBOM is valid SPDX 2.3.
 - The workflow signs nothing until every check that can run before the
   release passes.
-- A failed run deletes nothing in the registry. The release step first
-  deletes the old draft releases for the tag, and then it creates a new draft.
-  If a run fails, a person must look at the failure, fix the cause and start
-  the workflow again. See
+- A failed run deletes no artifact in the registry and no release. The
+  release step creates a new draft release. It deletes the old drafts for the
+  tag only after the publication. If a run fails, a person must look at the
+  failure, fix the cause and start the workflow again. See
   [When a run fails](#when-a-run-fails).
 - The workflow never moves an OCI tag. If the tag of a version is already in
   the destination registry, the run compares the module under the tag with
@@ -153,8 +153,9 @@ and run it.
        render the release notes
        sign the artifact, the module file and the SUSE SBOM
        attest the SUSE SBOM, verify our own signatures
-       delete old drafts, create a draft release, upload the assets
+       create a draft release, upload the assets
        check the draft, publish it by its id, check the release again
+       delete the old drafts for the tag
        on failure: the job fails
                           |
                           v
@@ -216,16 +217,16 @@ steps in one process. Each step is a log group:
 6. Generate the SUSE SBOM.
 7. Download the upstream source archive and render the release notes.
 8. Sign and attest. The step also verifies every signature.
-9. Publish the release. The step deletes the old drafts for the tag. Then it
-   creates a draft release through the GitHub API and uploads the assets to
-   it. Then it reads the draft by the id in the response to the creation. It
-   checks the tag, the commit, the names of the 7 assets, and the state, size
-   and sha256 digest of each asset. It also checks that the tag does not exist
-   and that no published release has the tag. If a check fails, the draft
-   stays and the step stops. Next, it publishes that draft by its id. It does
-   not look for the draft by its tag, because another draft can have the same
-   tag. Last, it reads the release again and makes the same checks. It also
-   makes sure that the tag points at the commit of the run.
+9. Publish the release. The step creates a draft release through the GitHub
+   API and uploads the assets to it. Then it reads the draft by the id in the
+   response to the creation. It checks the tag, the commit, the names of the 7
+   assets, and the state, size and sha256 digest of each asset. It also checks
+   that the tag does not exist and that no published release has the tag. If a
+   check fails, the draft stays and the step stops. Next, it publishes that
+   draft by its id. It does not look for the draft by its tag, because another
+   draft can have the same tag. Then it reads the release again and makes the
+   same checks. It also makes sure that the tag points at the commit of the
+   run. Last, if these checks pass, it deletes the old drafts for the tag.
 
 The program signs nothing before step 8. If a step fails, the job fails and
 the later steps do not run. See [When a run fails](#when-a-run-fails).
@@ -379,31 +380,43 @@ The deletion removes the attestation from the registry only. Its entry in
 the public Rekor transparency log stays, because nobody can delete a Rekor
 entry.
 
-Before it creates the new draft release, the program deletes the old draft
-releases for the tag. It deletes only a release that the list of releases
-shows as a draft. If a person publishes that draft in the short time between
-the list and the delete, the program deletes a published release.
+The draft releases of failed runs stay until a run publishes the release.
+A draft of a failed run does not stop the next run. After the publication
+and its checks, the run deletes the old drafts for the tag. Before each
+delete, it reads the release again, and it deletes the release only if it is
+still a draft. The run does not delete a draft before the publication. At
+that time, a person can publish an old draft between the list and the
+delete. Then the run deletes a published release, and nobody can use its tag
+again.
+
+If GitHub answers that an old draft does not exist, the run counts it as
+deleted. If the run cannot delete an old draft, the job still passes,
+because the release is published and correct. The log shows a warning, and
+the job summary says that the run cannot delete one or more old drafts for
+the tag. Then a person must delete them by hand.
 
 ### When a run fails
 
 The releases of this repository are immutable. A second try can fail again
 or publish a wrong result. Thus the workflow does not try a failed release
 again by itself. A failed step stops the job, and the job fails with an
-error in the log. A failed run deletes nothing in the registry. The release
-step first deletes the old drafts for the tag. The draft release of a failed
-run and the artifact stay for the next run.
+error in the log. A failed run deletes no artifact in the registry and no
+release. The draft release of a failed run and the artifact stay for the
+next run.
 
 A failed signature check can come from a bad signature or from a short
 network error. The program tries each check one time only. If a check
 fails, the job fails, and a person can start the workflow again.
 
 If a check of the draft fails before the publication, the run publishes
-nothing. The draft stays for a person to look at, and the next run deletes it.
+nothing. The draft stays for a person to look at. The run that publishes the
+release deletes it.
 
 If the check of the release after the publication fails, the run fails too.
 This check also covers the download address. The release is published and
 immutable then, so a person must check it and fix it by hand. The job
-summary also says that the check failed.
+summary also says that the check failed. The run does not delete the old
+drafts for the tag then, so a person must also delete them by hand.
 
 The call that publishes the release can fail after GitHub published the
 release, for example when the connection breaks. Then the program does not
@@ -413,7 +426,8 @@ To try a failed release again:
 
 1. Read the log of the failed workflow run.
 2. Look at the draft release for the tag, if there is one. If it is
-   incomplete, you can delete it. The next run also deletes it.
+   incomplete, you can delete it. The run that publishes the release also
+   deletes it.
 3. Look at the artifact in the destination registry, if there is one. Make
    sure that it is correct, or delete it. For example, delete it if the
    run stopped because the tag holds another module.
