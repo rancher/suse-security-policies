@@ -97,6 +97,17 @@ signing and distribution problems here.
 - The releases of this repository are immutable. After the publication, nobody
   can change the assets or the tag of a release. Thus the workflow uploads the
   assets to a draft release, and only then publishes the release.
+- Before the publication, the program reads the draft by its id. It checks
+  the tag, the commit, the names of the 7 assets, and the state, size and
+  sha256 digest of each asset. It also checks that the tag does not exist and
+  that no published release has the tag. After the publication, it reads the
+  release again and makes the same checks. It also makes sure that the tag
+  points at the commit of the run.
+- GitHub cannot check and publish a release in one step. A person or a token
+  with write access to the repository can change the draft or push the tag
+  between the check and the publication. The program finds such a change
+  after the publication, but it cannot prevent it. Thus give write access to
+  the repository only to the people and tools that need it.
 
 ## How it works
 
@@ -143,7 +154,7 @@ and run it.
        sign the artifact, the module file and the SUSE SBOM
        attest the SUSE SBOM, verify our own signatures
        delete old drafts, create a draft release, upload the assets
-       publish that draft by its id
+       check the draft, publish it by its id, check the release again
        on failure: the job fails
                           |
                           v
@@ -207,9 +218,14 @@ steps in one process. Each step is a log group:
 8. Sign and attest. The step also verifies every signature.
 9. Publish the release. The step deletes the old drafts for the tag. Then it
    creates a draft release through the GitHub API and uploads the assets to
-   it. Last, it publishes that draft by the id in the response to the
-   creation. It does not look for the draft by its tag, because another draft
-   can have the same tag.
+   it. Then it reads the draft by the id in the response to the creation. It
+   checks the tag, the commit, the names of the 7 assets, and the state, size
+   and sha256 digest of each asset. It also checks that the tag does not exist
+   and that no published release has the tag. If a check fails, the draft
+   stays and the step stops. Next, it publishes that draft by its id. It does
+   not look for the draft by its tag, because another draft can have the same
+   tag. Last, it reads the release again and makes the same checks. It also
+   makes sure that the tag points at the commit of the run.
 
 The program signs nothing before step 8. If a step fails, the job fails and
 the later steps do not run. See [When a run fails](#when-a-run-fails).
@@ -381,14 +397,17 @@ A failed signature check can come from a bad signature or from a short
 network error. The program tries each check one time only. If a check
 fails, the job fails, and a person can start the workflow again.
 
-If the check of the download address fails after the publication, the run
-fails too. The release is published and immutable then, so a person must
-check it and fix it by hand. The job summary also says that the check
-failed.
+If a check of the draft fails before the publication, the run publishes
+nothing. The draft stays for a person to look at, and the next run deletes it.
+
+If the check of the release after the publication fails, the run fails too.
+This check also covers the download address. The release is published and
+immutable then, so a person must check it and fix it by hand. The job
+summary also says that the check failed.
 
 The call that publishes the release can fail after GitHub published the
-release, for example when the connection breaks. The program does not read
-the release again. Then a person must check the release by hand.
+release, for example when the connection breaks. Then the program does not
+read the release again, and a person must check the release by hand.
 
 To try a failed release again:
 

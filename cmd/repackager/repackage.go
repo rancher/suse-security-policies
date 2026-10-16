@@ -473,6 +473,57 @@ func sameSBOM(ref string, out []byte, sbom string) error {
 	return cmp.Or(err, fmt.Errorf("the SBOM attestation of %s differs from the release SBOM. A person must delete the old attestation and run again", ref))
 }
 
+type releaseFile struct {
+	size   int64
+	sha256 string
+}
+
+// checkRelease treats a missing or null digest as a difference, so that a
+// change of the GitHub API makes the check fail.
+func checkRelease(rel any, d *repackageData, id int64, files map[string]releaseFile, wantDraft bool) error {
+	var errs []error
+	if got, ok := get(rel, "id").(float64); !ok || got != float64(id) {
+		errs = append(errs, fmt.Errorf("the id is %v instead of %d", get(rel, "id"), id))
+	}
+	if get(rel, "draft") != wantDraft {
+		errs = append(errs, fmt.Errorf("draft is %v instead of %v", get(rel, "draft"), wantDraft))
+	}
+	if str(rel, "tag_name") != d.tag {
+		errs = append(errs, fmt.Errorf("tag_name is %q instead of %q", str(rel, "tag_name"), d.tag))
+	}
+	if str(rel, "target_commitish") != d.sha {
+		errs = append(errs, fmt.Errorf("target_commitish is %q instead of %q", str(rel, "target_commitish"), d.sha))
+	}
+	seen := map[string]bool{}
+	for _, a := range list(rel, "assets") {
+		name := str(a, "name")
+		f, ok := files[name]
+		if !ok {
+			errs = append(errs, fmt.Errorf("the asset %q is not expected", name))
+			continue
+		} else if seen[name] {
+			errs = append(errs, fmt.Errorf("the release has the asset %q more than one time", name))
+			continue
+		}
+		seen[name] = true
+		if str(a, "state") != "uploaded" {
+			errs = append(errs, fmt.Errorf("the asset %q has the state %v instead of \"uploaded\"", name, get(a, "state")))
+		}
+		if size, _ := get(a, "size").(float64); size != float64(f.size) {
+			errs = append(errs, fmt.Errorf("the asset %q has the size %v instead of %d", name, get(a, "size"), f.size))
+		}
+		if str(a, "digest") != "sha256:"+f.sha256 {
+			errs = append(errs, fmt.Errorf("the asset %q has the digest %v instead of sha256:%s", name, get(a, "digest"), f.sha256))
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(files)) {
+		if !seen[name] {
+			errs = append(errs, fmt.Errorf("the asset %q is missing", name))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // publish uploads to a draft first, because only a draft can change.
 // GitHub creates the tag at --sha on the publication.
 func publish(ctx context.Context, d *repackageData) error {
@@ -481,6 +532,18 @@ func publish(ctx context.Context, d *repackageData) error {
 	assets := []string{
 		d.path(suseWasmName), d.path(suseWasmBundleName), d.path(sourceArchiveName), d.path(suseSBOMName),
 		d.path(suseSBOMBundleName), d.path(upstreamSBOMName), d.path(upstreamSBOMBundleName),
+	}
+	files := map[string]releaseFile{}
+	for _, a := range assets {
+		info, err := os.Stat(a)
+		if err != nil {
+			return err
+		}
+		sum, err := fileSHA256(a)
+		if err != nil {
+			return err
+		}
+		files[filepath.Base(a)] = releaseFile{info.Size(), sum}
 	}
 	releases, err := releasesOf(ctx, d.repo)
 	for _, r := range releases {
@@ -491,7 +554,7 @@ func publish(ctx context.Context, d *repackageData) error {
 		}
 		_, err = githubAPI(ctx, "-X", "DELETE", fmt.Sprintf("repos/%s/releases/%.0f", d.repo, get(r, "id")))
 	}
-	var draft, published any
+	var draft any
 	if err == nil {
 		draft, err = decode(githubAPI(ctx, "-X", "POST", "repos/"+d.repo+"/releases", "-f", "tag_name="+d.tag, "-f", "target_commitish="+d.sha,
 			"-f", "name="+d.tag, "-F", "draft=true", "-f", "make_latest=false", "-F", "body=@"+d.path(releaseNotesName)))
@@ -512,23 +575,62 @@ func publish(ctx context.Context, d *repackageData) error {
 			return fmt.Errorf("cannot upload %s to the draft release %s: %w", filepath.Base(a), d.tag, err)
 		}
 	}
-	published, err = decode(githubAPI(ctx, "-X", "PATCH", fmt.Sprintf("repos/%s/releases/%d", d.repo, int64(id)), "-F", "draft=false", "-f", "make_latest=false"))
+	releasePath, tagPath := fmt.Sprintf("repos/%s/releases/%d", d.repo, int64(id)), "repos/"+d.repo+"/git/ref/tags/"+d.tag
+	published, err := ghExists(ctx, "repos/"+d.repo+"/releases/tags/"+d.tag)
+	if err == nil && published {
+		err = fmt.Errorf("the release %s is already published", d.tag)
+	}
+	// GitHub ignores target_commitish when the tag exists, so a tag that
+	// somebody pushed during the run decides the commit of the release.
+	var tagged bool
+	if err == nil {
+		tagged, err = ghExists(ctx, tagPath)
+	}
+	if err == nil && tagged {
+		err = fmt.Errorf("the tag %s exists", d.tag)
+	}
+	var rel any
+	if err == nil {
+		rel, err = decode(githubAPI(ctx, releasePath))
+	}
+	if err == nil {
+		err = checkRelease(rel, d, int64(id), files, true)
+	}
 	if err != nil {
+		return fmt.Errorf("the check of the draft release %s failed, so the run does not publish it: %w", d.tag, err)
+	}
+	if _, err := githubAPI(ctx, "-X", "PATCH", releasePath, "-F", "draft=false", "-f", "make_latest=false"); err != nil {
 		return err
 	}
-	// A draft has only a temporary download address.
-	want := "https://github.com/" + d.repo + "/releases/download/" + d.tag + "/" + suseWasmName
-	failure := fmt.Sprintf("the published release has no asset at %q, the downloadLocation recorded in the SBOM", want)
-	for _, a := range list(published, "assets") {
-		if str(a, "browser_download_url") == want {
-			failure = ""
+	// GitHub cannot check and publish a release in one call. Thus only these
+	// reads show a change between the check above and the publication. After
+	// the publication, the assets and the tag cannot change, so they are final.
+	var ref any
+	rel, err = decode(githubAPI(ctx, releasePath))
+	if err == nil {
+		ref, err = decode(githubAPI(ctx, tagPath))
+	}
+	if err == nil {
+		// A draft has only a temporary download address.
+		want := "https://github.com/" + d.repo + "/releases/download/" + d.tag + "/" + suseWasmName
+		var noURL, wrongTag error
+		if !slices.ContainsFunc(list(rel, "assets"), func(a any) bool { return str(a, "browser_download_url") == want }) {
+			noURL = fmt.Errorf("the published release has no asset at %q, the downloadLocation recorded in the SBOM", want)
 		}
+		if typ, sha := str(ref, "object", "type"), str(ref, "object", "sha"); typ != "commit" || sha != d.sha {
+			wrongTag = fmt.Errorf("the tag %s points at the %s %q instead of the commit %s", d.tag, typ, sha, d.sha)
+		}
+		err = errors.Join(checkRelease(rel, d, int64(id), files, false), noURL, wrongTag)
+	}
+	failure := ""
+	if err != nil {
+		failure = err.Error()
 	}
 	if err := appendEnvFile("GITHUB_STEP_SUMMARY", cmdOut, releaseSummary(d, failure)); err != nil {
 		logf("::warning::%s", escapeData(err.Error()))
 	}
-	if failure != "" {
-		return fmt.Errorf("the release %s is published and immutable, but a check after the publication failed. A person must check and fix the release by hand: %s", d.tag, failure)
+	if err != nil {
+		return fmt.Errorf("the release %s is published and immutable, but a check after the publication failed. A person must check and fix the release by hand: %w", d.tag, err)
 	}
 	return nil
 }

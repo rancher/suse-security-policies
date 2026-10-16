@@ -24,7 +24,7 @@ type rule struct {
 	out    string
 	fn     func(work string) string // if not nil, gives the output at call time, in place of out
 	err    string                   // if not empty, the call fails with this message
-	write  string                   // if not empty, written to the path after -o or --output
+	write  string                   // if not empty, written to the path after -o, --output or --bundle
 	once   bool                     // if true, the rule is removed after its first match
 }
 
@@ -68,7 +68,7 @@ func (f *fake) run(_ context.Context, name string, args ...string) ([]byte, erro
 	}
 	if r.write != "" {
 		for k, a := range args[:len(args)-1] {
-			if a == "-o" || a == "--output" {
+			if a == "-o" || a == "--output" || a == "--bundle" {
 				if err := os.WriteFile(args[k+1], []byte(r.write), 0o644); err != nil {
 					f.t.Fatal(err)
 				}
