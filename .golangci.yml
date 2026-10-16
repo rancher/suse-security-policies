@@ -1,0 +1,15 @@
+version: "2"
+
+linters:
+  default: standard
+  settings:
+    govet:
+      disable:
+        # The analyzer reports calls it cannot inline because of type
+        # parameter inference. That is a limit of the analyzer, not a bug.
+        - inline
+  exclusions:
+    presets:
+      # The errors of Close, os.Remove and fmt.Fprint carry no useful
+      # information here.
+      - std-error-handling

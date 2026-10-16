@@ -1,0 +1,66 @@
+{
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "creationInfo": {
+    "created": "2026-01-02T03:04:05Z",
+    "creators": [
+      "Organization: SUSE",
+      "Tool: suse-security-policies"
+    ]
+  },
+  "dataLicense": "CC0-1.0",
+  "documentNamespace": "https://github.com/rancher/suse-security-policies/spdx/pod-privileged/1.2.3-2ff847c1-608d-5796-9921-69fedb2cff17",
+  "externalDocumentRefs": [
+    {
+      "checksum": {
+        "algorithm": "SHA256",
+        "checksumValue": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+      },
+      "externalDocumentId": "DocumentRef-upstream",
+      "spdxDocument": "https://kubewarden.io/spdx/pod-privileged-1.2.3"
+    }
+  ],
+  "name": "pod-privileged-1.2.3",
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-Package-pod-privileged",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "146c52e4d218b41373df919337af2a7f7e7dcdfeaa4154d75a8aca8df97b6310"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "downloadLocation": "https://github.com/rancher/suse-security-policies/releases/download/pod-privileged-policy/v1.2.3/suse-policy.wasm",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceLocator": "pkg:oci/pod-privileged@sha256%3Abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb?repository_url=ghcr.io/rancher/suse-security-policies/pod-privileged&tag=v1.2.3",
+          "referenceType": "purl"
+        }
+      ],
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "Apache-2.0",
+      "name": "pod-privileged",
+      "originator": "Organization: Kubewarden (cncf-kubewarden-maintainers@lists.cncf.io)",
+      "packageFileName": "suse-policy.wasm",
+      "primaryPackagePurpose": "APPLICATION",
+      "sourceInfo": "Repackaged by SUSE from https://github.com/kubewarden/policies release pod-privileged-policy/v1.2.3 (upstream OCI digest sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, upstream source commit cccccccccccccccccccccccccccccccccccccccc). kwctl annotate set the SUSE annotations (io.kubewarden.policy.ociUrl, io.kubewarden.policy.author, io.kubewarden.policy.url, org.opencontainers.image.source and com.suse.policy.upstream.*) in the io.kubewarden.metadata custom section and wrote the module out again. The program made sure that no other metadata changed, except the io.kubewarden.kwctl annotation. The program did not compare the other bytes of the module with upstream.",
+      "supplier": "Organization: SUSE",
+      "versionInfo": "1.2.3"
+    }
+  ],
+  "relationships": [
+    {
+      "relatedSpdxElement": "SPDXRef-Package-pod-privileged",
+      "relationshipType": "DESCRIBES",
+      "spdxElementId": "SPDXRef-DOCUMENT"
+    },
+    {
+      "relatedSpdxElement": "DocumentRef-upstream:SPDXRef-Package-src",
+      "relationshipType": "GENERATED_FROM",
+      "spdxElementId": "SPDXRef-Package-pod-privileged"
+    }
+  ],
+  "spdxVersion": "SPDX-2.3"
+}

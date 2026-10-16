@@ -1,0 +1,54 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "labels": ["area/dependencies"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update the tool versions and checksums in the Makefile",
+      "managerFilePatterns": ["/^Makefile$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: extractVersion=(?<extractVersion>\\S+))?\\s*\\n\\S+\\s*:=\\s*(?<currentValue>\\S+)",
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+) digestVersion=(?<currentValue>\\S+)\\s*\\n\\S+\\s*:=\\s*(?<currentDigest>[0-9a-f]{64})"
+      ]
+    },
+    {
+      "customType": "regex",
+      "description": "Update the tool versions in the env blocks of the workflows",
+      "managerFilePatterns": ["/^\\.github/workflows/.+\\.ya?ml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: extractVersion=(?<extractVersion>\\S+))?\\s*\\n\\s*[\\w-]+:\\s*[\"']?(?<currentValue>[^\\s\"']+)[\"']?"
+      ]
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Group GitHub Actions updates into a single pull request",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions-updates"
+    },
+    {
+      "description": "Group Go module updates into a single pull request",
+      "matchManagers": ["gomod"],
+      "groupName": "go-dependencies"
+    },
+    {
+      "description": "Update each pinned tool version and its checksum in a single pull request",
+      "matchManagers": ["custom.regex"],
+      "groupName": "pinned-tools"
+    },
+    {
+      "description": "Update kwctl, cosign and gh apart from the other tools, because they annotate, sign and publish the policies",
+      "matchManagers": ["custom.regex"],
+      "matchPackageNames": ["kubewarden/adm-controller", "sigstore/cosign", "cli/cli"],
+      "groupName": "signing-tools"
+    },
+    {
+      "description": "Open a cosign update only after a person approves it on the Dependency Dashboard. cosign v3 marks --new-bundle-format as deprecated, and a later cosign can drop legacy signing",
+      "matchManagers": ["custom.regex"],
+      "matchPackageNames": ["sigstore/cosign"],
+      "dependencyDashboardApproval": true
+    }
+  ],
+  "postUpdateOptions": ["gomodTidy"]
+}

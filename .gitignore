@@ -1,0 +1,18 @@
+# Artifacts produced by a local repackaging run in the work directory
+*.wasm
+*-metadata.yml
+*-metadata.yaml
+policy-sbom.spdx.json
+policy-sbom.spdx.jsonl.bundle.sigstore
+upstream-policy-sbom.spdx.json
+upstream-policy-sbom.spdx.jsonl.bundle.sigstore
+suse-policy.wasm.bundle.sigstore
+release-notes.md
+upstream-source.tar.gz
+
+# The repackager binary and the tools that make installs
+/bin/
+/cmd/repackager/repackager
+
+# A work directory for a local run, for example WORK_DIR=work
+/work/

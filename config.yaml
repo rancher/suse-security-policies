@@ -1,0 +1,40 @@
+upstream:
+  repository: kubewarden/policies
+  registry: ghcr.io/kubewarden/policies
+  # "{tag}" is replaced with the release tag, so the identity is pinned to
+  # the exact release. The Sigstore verification compares the value exactly.
+  # It is not a regular expression, so the tag needs no escaping.
+  certificate_identity_template: "https://github.com/kubewarden/policies/.github/workflows/release.yml@refs/tags/{tag}"
+  certificate_oidc_issuer: https://token.actions.githubusercontent.com
+
+destination:
+  # Must match the "io.kubewarden.policy.ociUrl" annotation of the policies.
+  registry: ghcr.io/rancher/suse-security-policies
+
+# "ociUrl" comes from destination.registry. "io.kubewarden.policy.source"
+# keeps the upstream value, because this repository holds no source code.
+metadata:
+  author: "SUSE <containers@suse.com>"
+  url: https://github.com/rancher/suse-security-policies
+
+# Values of the SBOM that the pipeline generates. The upstream SBOM is
+# republished unchanged, so it still verifies against the upstream identity.
+sbom:
+  # The generator appends a UUID derived from the artifact digest, so each
+  # artifact gets a unique namespace and a second run gets the same one.
+  namespace_base: https://github.com/rancher/suse-security-policies/spdx
+  supplier: "Organization: SUSE"
+  originator: "Organization: Kubewarden (cncf-kubewarden-maintainers@lists.cncf.io)"
+  tool_name: suse-security-policies
+
+# Upstream builds these policies but does not publish them. Keep in sync with
+# EXCLUDED_FROM_PUBLISHING in the upstream release workflow.
+excluded_policies:
+  - context-aware-demo
+  - go-wasi-context-aware-test-policy
+  - raw-mutation-policy
+  - raw-mutation-wasi-policy
+  - raw-validation-opa-policy
+  - raw-validation-policy
+  - raw-validation-wasi-policy
+  - sleeping-policy

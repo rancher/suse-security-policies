@@ -1,0 +1,188 @@
+name: Sync upstream policy releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      policy-name:
+        description: "Repackage only this policy, for example 'pod-privileged-policy'. Leave empty for all policies."
+        required: false
+        type: string
+        default: ""
+      policy-version:
+        description: "Pin the version to repackage, without the 'v' prefix. Requires policy-name."
+        required: false
+        type: string
+        default: ""
+      dry-run:
+        description: "Run every check that only reads, but push, sign and release nothing. Runs only on main."
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+# Two real runs would race to create the same tag, so they queue and are
+# never cancelled halfway through publishing. A dry run writes nothing, so it
+# has its own group.
+concurrency:
+  group: sync-upstream-releases-${{ inputs.dry-run && 'dry' || 'real' }}
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Discover releases to repackage
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+      count: ${{ steps.discover.outputs.count }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Any collaborator can push a branch and start this workflow from it, so
+      # only main can run it. This is also true for a dry run. The repackage
+      # job has write permissions and an id-token in a dry run too, because
+      # permissions cannot depend on an input. The repackage job checks the
+      # same condition. The repackager also stops if GITHUB_WORKFLOW_REF does
+      # not name a workflow file of this repository on the main branch, and it
+      # verifies the signatures against that identity.
+      - name: Refuse to run outside the main branch
+        if: github.ref != 'refs/heads/main'
+        env:
+          REF: ${{ github.ref }}
+        run: echo "::error::This workflow runs only on refs/heads/main, also for a dry run. This run is on '${REF}'." && exit 1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build the repackager and install gh
+        run: |
+          make build gh
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+
+      - name: Check the gh version
+        run: make check-gh-version
+
+      - name: Discover upstream releases without a matching release here
+        id: discover
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          POLICY_NAME: ${{ inputs.policy-name }}
+          POLICY_VERSION: ${{ inputs.policy-version }}
+          DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+        run: make discover
+
+  # The release is published last. The repository uses immutable releases, so
+  # after publication nobody can change the assets or reuse the tag. Signing
+  # comes after every check, so a failed run signs nothing that did not pass.
+  # In a dry run, the repackager pushes, signs and releases nothing.
+  #
+  # Do not move this job into a reusable workflow. The signing certificate
+  # names the workflow file, and a reusable workflow can be called from other
+  # repositories and branches with their own code. Without a workflow_call
+  # trigger, only a run in this repository signs with its identity.
+  repackage:
+    # GitHub does not expand the matrix of a skipped job, so a skipped job
+    # shows this expression as its name.
+    name: ${{ matrix.policy.tag }}
+    needs: discover
+    if: github.ref == 'refs/heads/main' && needs.discover.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: repackage-${{ inputs.dry-run && 'dry' || 'real' }}-${{ matrix.policy.tag }}
+      cancel-in-progress: false
+    permissions:
+      # Create the GitHub release and its tag
+      contents: write
+      # Push to the destination OCI registry
+      packages: write
+      # Sigstore keyless signing
+      id-token: write
+    strategy:
+      fail-fast: false
+      # Stay clear of the GitHub API and registry rate limits.
+      max-parallel: 5
+      matrix:
+        policy: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    env:
+      # kwctl 1.39 is the first version whose "annotate" changes single
+      # annotations. Use v1.39.0 when it is released.
+      # renovate: datasource=github-releases depName=kubewarden/adm-controller
+      KWCTL_VERSION: v1.39.0-rc.1
+      # renovate: datasource=github-releases depName=sigstore/cosign
+      COSIGN_VERSION: v3.1.3
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Any job on main can write a cache entry, and this job signs, so it
+      # uses no cache.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install kwctl
+        uses: kubewarden/github-actions/kwctl-installer@143b9e4b11ddc47370482267383586e6f1bc7efe # v7.0.1
+        with:
+          kwctl-version: ${{ env.KWCTL_VERSION }}
+
+      # The kwctl installer runs its own cosign-installer, which writes an
+      # older cosign to $HOME/.cosign/cosign. This step must come after it,
+      # because it writes the pinned cosign to the same file.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Build the repackager and install sbom-utility and gh
+        run: |
+          make build sbom-utility gh
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+
+      - name: Check the tool versions
+        run: |
+          kwctl --version
+          kwctl_version="v$(kwctl --version | awk 'NR == 1 { print $2 }')"
+          if [ "$kwctl_version" != "$KWCTL_VERSION" ]; then
+            echo "::error::kwctl is $kwctl_version, but the workflow pins $KWCTL_VERSION"
+            exit 1
+          fi
+          cosign version
+          if ! cosign version --json | jq -e --arg want "$COSIGN_VERSION" '.gitVersion == $want' > /dev/null; then
+            echo "::error::cosign is not $COSIGN_VERSION"
+            exit 1
+          fi
+          sbom-utility version
+          make check-gh-version
+
+      - name: Log in to the container registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The matrix values come in through the environment, never inline, so
+      # no matrix value can change the shell command. The step runs every
+      # step for one policy in one process.
+      - name: Repackage the policy
+        timeout-minutes: 25
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          POLICY_NAME: ${{ matrix.policy.policy_name }}
+          POLICY_VERSION: ${{ matrix.policy.version }}
+          DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+        run: make repackage

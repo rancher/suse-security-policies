@@ -1,0 +1,31 @@
+# The tests use this copy, not the config.yaml of the repository. A fork
+# changes config.yaml to publish somewhere else, and the goldens expect
+# these values.
+upstream:
+  repository: kubewarden/policies
+  registry: ghcr.io/kubewarden/policies
+  certificate_identity_template: "https://github.com/kubewarden/policies/.github/workflows/release.yml@refs/tags/{tag}"
+  certificate_oidc_issuer: https://token.actions.githubusercontent.com
+
+destination:
+  registry: ghcr.io/rancher/suse-security-policies
+
+metadata:
+  author: "SUSE <containers@suse.com>"
+  url: https://github.com/rancher/suse-security-policies
+
+sbom:
+  namespace_base: https://github.com/rancher/suse-security-policies/spdx
+  supplier: "Organization: SUSE"
+  originator: "Organization: Kubewarden (cncf-kubewarden-maintainers@lists.cncf.io)"
+  tool_name: suse-security-policies
+
+excluded_policies:
+  - context-aware-demo
+  - go-wasi-context-aware-test-policy
+  - raw-mutation-policy
+  - raw-mutation-wasi-policy
+  - raw-validation-opa-policy
+  - raw-validation-policy
+  - raw-validation-wasi-policy
+  - sleeping-policy
