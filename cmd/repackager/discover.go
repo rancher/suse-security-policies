@@ -35,7 +35,8 @@ func discover(ctx context.Context, cfg *config, repo, name, version string) ([]m
 	}
 	upstream, err1 := releasesOf(ctx, cfg.Upstream.Repository)
 	dest, err2 := releasesOf(ctx, repo)
-	if err := errors.Join(err1, err2); err != nil {
+	tags, err3 := tagsOf(ctx, repo)
+	if err := errors.Join(err1, err2, err3); err != nil {
 		return nil, fmt.Errorf("discover: %w", err)
 	}
 	var candidates []map[string]string
@@ -73,6 +74,16 @@ func discover(ctx context.Context, cfg *config, repo, name, version string) ([]m
 			continue
 		} else if released[e["tag"]] {
 			logf("%s already has the release %s. The repackage job verifies the published release", repo, e["tag"])
+		} else if tags[e["tag"]] {
+			// The repackage job stops at such a tag. After someone deletes an
+			// immutable release, nobody can use its tag again. Without the
+			// skip, each full run fails until upstream releases a newer version.
+			err := fmt.Errorf("the tag exists in %s without a published release. A person must check the tag", repo)
+			if name != "" {
+				return nil, fmt.Errorf("discover: %s: %w", e["tag"], err)
+			}
+			logf("::warning::%s", escapeData(fmt.Sprintf("skip %s: %v. The other policies are not affected", e["tag"], err)))
+			continue
 		}
 		id, skip, err := policyID(ctx, cfg, e)
 		// Without a filter, a problem of one release does not stop the others.
@@ -97,6 +108,21 @@ func releasesOf(ctx context.Context, repo string) ([]any, error) {
 		all = append(all, list(p)...)
 	}
 	return all, err
+}
+
+// matching-refs gives an empty list when the repository has no tag. Its
+// documentation lists no 404, only a 409 for a repository without commits.
+func tagsOf(ctx context.Context, repo string) (map[string]bool, error) {
+	pages, err := decode(githubAPI(ctx, "--paginate", "--slurp", "repos/"+repo+"/git/matching-refs/tags/"))
+	tags := map[string]bool{}
+	for _, p := range list(pages) {
+		for _, r := range list(p) {
+			if tag, ok := strings.CutPrefix(str(r, "ref"), "refs/tags/"); ok {
+				tags[tag] = true
+			}
+		}
+	}
+	return tags, err
 }
 
 func candidate(release any) map[string]string {

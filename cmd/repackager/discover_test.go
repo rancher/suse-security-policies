@@ -19,6 +19,8 @@ func metadataRule(name, id, version string) rule {
 		out: "annotations:\n  io.kubewarden.policy.ociUrl: ghcr.io/kubewarden/policies/" + id + "\n  io.kubewarden.policy.version: " + version + "\n"}
 }
 
+const tagsCall = "gh api --hostname github.com --paginate --slurp repos/rancher/suse-security-policies/git/matching-refs/tags/"
+
 func discoverRules() []rule {
 	// gh writes the pages of --paginate --slurp as a list of lists.
 	upstream := "[[" + strings.Join([]string{
@@ -34,9 +36,11 @@ func discoverRules() []rule {
 	}, ",") + "]]"
 	// A draft is the remainder of a failed run, so it does not count as released.
 	dest := `[[{"tag_name":"safe-labels-policy/v2.0.0","draft":false},{"tag_name":"pod-privileged-policy/v1.10.0","draft":true}]]`
+	tags := `[[{"ref":"refs/tags/safe-labels-policy/v2.0.0"}],[{"ref":"refs/tags/pod-privileged-policy/v1.0.0"}]]`
 	return []rule{
 		{prefix: "gh api --hostname github.com --paginate --slurp repos/kubewarden/policies/releases", out: upstream},
 		{prefix: "gh api --hostname github.com --paginate --slurp repos/rancher/suse-security-policies/releases", out: dest},
+		{prefix: tagsCall, out: tags},
 		metadataRule("pod-privileged-policy", "pod-privileged", "1.10.0"),
 		metadataRule("pod-privileged-policy", "pod-privileged", "1.9.0"),
 		metadataRule("capabilities-psp-policy", "capabilities-psp", "1.0.0"),
@@ -55,6 +59,7 @@ func TestDiscover(t *testing.T) {
 	wantCalls := []string{
 		"gh api --hostname github.com --paginate --slurp repos/kubewarden/policies/releases",
 		"gh api --hostname github.com --paginate --slurp repos/rancher/suse-security-policies/releases",
+		tagsCall,
 		"gh api --hostname github.com -H Accept: application/vnd.github.raw --allow-escape-sequences repos/kubewarden/policies/contents/policies/capabilities-psp-policy/metadata.yml?ref=capabilities-psp-policy%2Fv1.0.0",
 		"gh api --hostname github.com -H Accept: application/vnd.github.raw --allow-escape-sequences repos/kubewarden/policies/contents/policies/pod-privileged-policy/metadata.yml?ref=pod-privileged-policy%2Fv1.10.0",
 	}
@@ -153,6 +158,60 @@ func TestDiscoverMissingMetadata(t *testing.T) {
 			}
 			if err != nil || strings.Contains(stdout, "capabilities-psp") || !strings.Contains(stdout, tt.wantOut) {
 				t.Errorf("discover returned %q (error: %v), expected only %q", stdout, err, tt.wantOut)
+			}
+		})
+	}
+}
+
+func TestDiscoverTagWithoutRelease(t *testing.T) {
+	burned := rule{prefix: tagsCall, out: `[[{"ref":"refs/tags/capabilities-psp-policy/v1.0.0"},{"ref":"refs/tags/pod-privileged-policy/v1.9.0"}]]`}
+	tests := []struct {
+		name, wantErr, wantLog string
+		args                   []string
+		rules                  []rule
+		wantTags               []string
+	}{
+		{name: "full discovery skips the tag", rules: append([]rule{burned}, discoverRules()...), wantTags: []string{"pod-privileged-policy/v1.10.0"},
+			wantLog: "::warning::skip capabilities-psp-policy/v1.0.0: the tag exists in rancher/suse-security-policies without a published release. A person must check the tag"},
+		{name: "policy name stops", args: []string{"--policy-name", "capabilities-psp-policy"}, rules: append([]rule{burned}, discoverRules()...),
+			wantErr: "capabilities-psp-policy/v1.0.0: the tag exists in rancher/suse-security-policies without a published release"},
+		{name: "pinned version stops", args: []string{"--policy-name", "pod-privileged-policy", "--policy-version", "1.9.0"}, rules: append([]rule{burned}, discoverRules()...),
+			wantErr: "pod-privileged-policy/v1.9.0: the tag exists"},
+		{name: "tag list fails", rules: append([]rule{{prefix: tagsCall, err: "gh: Server Error (HTTP 502)"}}, discoverRules()...), wantErr: "HTTP 502"},
+		{name: "no tags", rules: append([]rule{{prefix: tagsCall, out: "[[]]"}}, discoverRules()...),
+			wantTags: []string{"capabilities-psp-policy/v1.0.0", "pod-privileged-policy/v1.10.0"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFake(t, "", tt.rules...)
+			var log strings.Builder
+			logOut = &log
+			stdout, err := execute(t, append([]string{"discover", "--config", "testdata/config.yaml", "--repository", "rancher/suse-security-policies"}, tt.args...)...)
+			if !strings.Contains(log.String(), tt.wantLog) {
+				t.Errorf("the log does not contain %q:\n%s", tt.wantLog, log.String())
+			}
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("discover returned the error %v, but the test expects an error with %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("discover failed: %v", err)
+			}
+			var releases []map[string]string
+			if err := json.Unmarshal([]byte(stdout), &releases); err != nil {
+				t.Fatal(err)
+			}
+			var tags []string
+			for _, r := range releases {
+				tags = append(tags, r["tag"])
+			}
+			if !slices.Equal(tags, tt.wantTags) {
+				t.Errorf("discover found %q, expected %q", tags, tt.wantTags)
+			}
+			if slices.ContainsFunc(f.calls, func(c string) bool { return strings.Contains(c, "capabilities-psp-policy%2Fv1.0.0") }) != slices.Contains(tt.wantTags, "capabilities-psp-policy/v1.0.0") {
+				t.Errorf("discover read the metadata of a skipped tag, or did not read the metadata of a queued tag:\n%s", strings.Join(f.calls, "\n"))
 			}
 		})
 	}

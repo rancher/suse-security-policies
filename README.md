@@ -193,6 +193,13 @@ person gives `policy-version`, the command keeps a published release. The
 `repackage` job then verifies it. See
 [Running a release again](#running-a-release-again).
 
+The command also reads the tags of this repository one time. A tag can exist
+without a published release, for example after someone deleted an immutable
+release or pushed the tag by hand. The `repackage` job stops at such a tag.
+Thus the command skips that version with a warning that names the tag. A
+person must check the tag. The other policies go on. When a person asks for
+one policy by name, this tag stops the discovery with an error instead.
+
 A published GitHub release in this repository is the only record that a
 version is published. A draft release does not count.
 
@@ -919,8 +926,10 @@ change both pins to that release.
 - If GitHub loses the runner of a job, the job fails. The next run that a
   person starts reuses what the lost run left.
 - If the tag of a version exists without a published release, for example
-  after someone deleted the release, the run stops before the push. A
-  repository with immutable releases cannot use that tag again.
+  after someone deleted the release, the discovery skips the version, and the
+  run stops before the push. A repository with immutable releases cannot use
+  that tag again. Thus the workflow does not publish that version. A newer
+  upstream version of the policy gets its release as usual.
 - The pipeline does not prove that the bytes outside the metadata section are
   the same as upstream. `kwctl annotate` writes the whole module out again,
   and the upstream module went through a different kwctl version. Two changes
