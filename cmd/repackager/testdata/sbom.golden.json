@@ -45,7 +45,7 @@
       "originator": "Organization: Kubewarden (cncf-kubewarden-maintainers@lists.cncf.io)",
       "packageFileName": "suse-policy.wasm",
       "primaryPackagePurpose": "APPLICATION",
-      "sourceInfo": "Repackaged by SUSE from https://github.com/kubewarden/policies release pod-privileged-policy/v1.2.3 (upstream OCI digest sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, upstream source commit cccccccccccccccccccccccccccccccccccccccc). The WebAssembly code sections are unmodified; the io.kubewarden.metadata custom section was replaced with SUSE provenance annotations.",
+      "sourceInfo": "Repackaged by SUSE from https://github.com/kubewarden/policies release pod-privileged-policy/v1.2.3 (upstream OCI digest sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, upstream source commit cccccccccccccccccccccccccccccccccccccccc). kwctl annotate set the SUSE annotations (io.kubewarden.policy.ociUrl, io.kubewarden.policy.author, io.kubewarden.policy.url and com.suse.policy.upstream.*) in the io.kubewarden.metadata custom section and wrote the module out again. The program made sure that no other metadata changed, except the io.kubewarden.kwctl annotation. The program did not compare the other bytes of the module with upstream.",
       "supplier": "Organization: SUSE",
       "versionInfo": "1.2.3"
     }

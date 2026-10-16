@@ -16,7 +16,7 @@ signing and distribution problems here.
 
 ## What the pipeline guarantees
 
-- The published module is the upstream module. The workflow pulls it by
+- The published module comes from the upstream module. The workflow pulls it by
   digest from the upstream artifact that it checked. A digest is the sha256
   hash that identifies one artifact. The workflow does not compile the module
   again. `kwctl annotate` reads the module, replaces the metadata section, and
@@ -425,7 +425,10 @@ record, not a scan. It contains one package, which describes
 - `supplier: SUSE` and `originator: Kubewarden`. SPDX uses these two fields to
   separate the party that distributes an artifact from the party that made it.
 - The upstream repository, the release tag, the OCI digest and the source
-  commit, in `sourceInfo`.
+  commit, in `sourceInfo`. `sourceInfo` also names the annotations that
+  `kwctl annotate` set. It says that the program made sure that no other
+  metadata changed, except the `io.kubewarden.kwctl` annotation, and that the
+  program did not compare the other bytes of the module.
 - The license fields, copied from the root package of the upstream document.
   SUSE does not state its own license conclusion.
 - An `externalDocumentRefs` entry. It names the upstream document by its

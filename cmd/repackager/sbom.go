@@ -114,7 +114,7 @@ func suseSBOM(ctx context.Context, d *repackageData) error {
 			}},
 			SourceInfo: "Repackaged by SUSE from https://github.com/" + cfg.Upstream.Repository + " release " + d.tag +
 				" (upstream OCI digest " + d.upstreamDigest + ", upstream source commit " + cmp.Or(str(root, "versionInfo"), "unknown") +
-				"). The WebAssembly code sections are unmodified; the io.kubewarden.metadata custom section was replaced with SUSE provenance annotations.",
+				"). kwctl annotate set the SUSE annotations (io.kubewarden.policy.ociUrl, io.kubewarden.policy.author, io.kubewarden.policy.url and com.suse.policy.upstream.*) in the io.kubewarden.metadata custom section and wrote the module out again. The program made sure that no other metadata changed, except the io.kubewarden.kwctl annotation. The program did not compare the other bytes of the module with upstream.",
 			// SUSE did not determine the licenses.
 			LicenseConcluded: orNoAssertion(root, "licenseConcluded"), LicenseDeclared: orNoAssertion(root, "licenseDeclared"),
 			CopyrightText: orNoAssertion(root, "copyrightText"),
