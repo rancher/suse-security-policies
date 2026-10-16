@@ -25,7 +25,8 @@ var (
 )
 
 // discover returns the upstream releases that have no published release in
-// repo. A draft is the remainder of a failed run, so it does not count.
+// repo. A draft is the remainder of a failed run, so it does not count. A
+// pinned version is also returned when it has a published release.
 func discover(ctx context.Context, cfg *config, repo, name, version string) ([]map[string]string, error) {
 	if version != "" && name == "" {
 		return nil, errors.New("discover: a pinned policy version needs a policy name")
@@ -64,9 +65,14 @@ func discover(ctx context.Context, cfg *config, repo, name, version string) ([]m
 	slices.SortStableFunc(selected, func(a, b map[string]string) int { return cmp.Compare(a["policy_name"], b["policy_name"]) })
 	out := []map[string]string{}
 	for _, e := range selected {
-		if excluded := slices.Contains(cfg.ExcludedPolicies, e["policy_name"]); excluded || released[e["tag"]] {
+		// A pinned version goes on to the repackage job, which verifies the
+		// published release. Thus a person can check a release whose
+		// publication response got lost.
+		if excluded := slices.Contains(cfg.ExcludedPolicies, e["policy_name"]); excluded || released[e["tag"]] && version == "" {
 			logf("skip %s: %s", e["tag"], map[bool]string{true: "the policy is excluded from publishing", false: repo + " already has the release"}[excluded])
 			continue
+		} else if released[e["tag"]] {
+			logf("%s already has the release %s. The repackage job verifies the published release", repo, e["tag"])
 		}
 		id, skip, err := policyID(ctx, cfg, e)
 		// Without a filter, a problem of one release does not stop the others.

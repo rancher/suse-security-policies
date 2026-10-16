@@ -57,6 +57,17 @@ func releaseSummary(d *repackageData, checkFailure, cleanupFailure string) strin
 		d.upstreamDigest, d.immutableRef, d.tag, d.sourceCommit, d.sourceSHA256, upstreamSum, suseSum, d.suseNamespace)
 }
 
+func publishedSummary(d *repackageData, failure string) string {
+	s := "### Verified the published release " + d.tag + "\n\n"
+	if failure != "" {
+		s = "### Published release " + d.tag + "\n\n> A check of the published release failed: " + strings.Join(strings.Fields(failure), " ") + ". The release is published and immutable. Check it by hand.\n\n"
+	} else {
+		s += "The release is already published, so the run did not repackage the policy. The run verified the published release.\n\n"
+	}
+	return s + fmt.Sprintf("| | |\n|---|---|\n| Published artifact | `%s` |\n| Release | %s |\n| Release commit | `%s` |\n",
+		d.immutableRef, d.tag, str(d.published, "target_commitish"))
+}
+
 func discoverySummary(releases []map[string]string, dryRun bool) string {
 	s := "### Policies queued for repackaging\n\n"
 	if dryRun {

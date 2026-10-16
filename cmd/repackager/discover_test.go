@@ -40,6 +40,7 @@ func discoverRules() []rule {
 		metadataRule("pod-privileged-policy", "pod-privileged", "1.10.0"),
 		metadataRule("pod-privileged-policy", "pod-privileged", "1.9.0"),
 		metadataRule("capabilities-psp-policy", "capabilities-psp", "1.0.0"),
+		metadataRule("safe-labels-policy", "safe-labels", "2.0.0"),
 	}
 }
 
@@ -79,10 +80,13 @@ func TestDiscoverFilters(t *testing.T) {
 		args     []string
 		wantTags []string
 		wantErr  string
+		wantLog  string
 	}{
 		{name: "policy name", args: []string{"--policy-name", "pod-privileged-policy"}, wantTags: []string{"pod-privileged-policy/v1.10.0"}},
 		{name: "older pinned version", args: []string{"--policy-name", "pod-privileged-policy", "--policy-version", "1.9.0"}, wantTags: []string{"pod-privileged-policy/v1.9.0"}},
 		{name: "already released", args: []string{"--policy-name", "safe-labels-policy"}, wantTags: []string{}},
+		{name: "pinned version already released", args: []string{"--policy-name", "safe-labels-policy", "--policy-version", "2.0.0"},
+			wantTags: []string{"safe-labels-policy/v2.0.0"}, wantLog: "The repackage job verifies the published release"},
 		{name: "prerelease version", args: []string{"--policy-name", "pod-privileged-policy", "--policy-version", "2.0.0"}, wantErr: "no upstream release matches"},
 		{name: "version without name", args: []string{"--policy-version", "1.9.0"}, wantErr: "needs a policy name"},
 		{name: "excluded policy", args: []string{"--policy-name", "sleeping-policy"}, wantErr: "excluded from publishing"},
@@ -90,7 +94,12 @@ func TestDiscoverFilters(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			newFake(t, "", discoverRules()...)
+			var log strings.Builder
+			logOut = &log
 			stdout, err := execute(t, append([]string{"discover", "--config", "testdata/config.yaml", "--repository", "rancher/suse-security-policies"}, tt.args...)...)
+			if !strings.Contains(log.String(), tt.wantLog) {
+				t.Errorf("the log does not contain %q:\n%s", tt.wantLog, log.String())
+			}
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Errorf("discover returned the error %v, but the test expects an error with %q", err, tt.wantErr)

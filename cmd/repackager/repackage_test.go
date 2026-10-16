@@ -93,10 +93,84 @@ func attested(edit func(sbom map[string]any)) func(work string) string {
 		if edit != nil {
 			edit(sbom)
 		}
-		statement, _ := json.Marshal(map[string]any{"_type": "https://in-toto.io/Statement/v0.1", "predicateType": "https://spdx.dev/Document", "predicate": sbom})
-		envelope, _ := json.Marshal(map[string]any{"payloadType": "application/vnd.in-toto+json", "payload": base64.StdEncoding.EncodeToString(statement), "signatures": []any{}})
-		return string(envelope) + "\n"
+		return envelope(sbom)
 	}
+}
+
+func envelope(sbom any) string {
+	statement, _ := json.Marshal(map[string]any{"_type": "https://in-toto.io/Statement/v0.1", "predicateType": "https://spdx.dev/Document", "predicate": sbom})
+	out, _ := json.Marshal(map[string]any{"payloadType": "application/vnd.in-toto+json", "payload": base64.StdEncoding.EncodeToString(statement), "signatures": []any{}})
+	return string(out) + "\n"
+}
+
+// publishedSHA is the commit of an earlier run, which is not testSHA.
+var publishedSHA = strings.Repeat("9", 40)
+
+// publishedFiles gives the assets of a published release. If editSBOM is not
+// nil, it changes the SUSE SBOM and its package.
+func publishedFiles(editSBOM func(doc, pkg map[string]any)) map[string]string {
+	wasm := "suse wasm"
+	sum := sha256.Sum256([]byte(wasm))
+	upstreamSBOM := `{"documentNamespace":"https://kubewarden.io/spdx/pod-privileged-1.2.3"}`
+	upstreamSum := sha256.Sum256([]byte(upstreamSBOM))
+	pkg := map[string]any{"SPDXID": "SPDXRef-Package-pod-privileged", "checksums": []any{map[string]any{"algorithm": "SHA256", "checksumValue": hex.EncodeToString(sum[:])}},
+		"externalRefs": []any{map[string]any{"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl",
+			"referenceLocator": "pkg:oci/pod-privileged@sha256%3A" + strings.Repeat("b", 64) + "?repository_url=ghcr.io/rancher/suse-security-policies/pod-privileged&tag=v1.2.3"}}}
+	doc := map[string]any{"SPDXID": "SPDXRef-DOCUMENT", "packages": []any{pkg}, "externalDocumentRefs": []any{map[string]any{"externalDocumentId": "DocumentRef-upstream",
+		"spdxDocument": "https://kubewarden.io/spdx/pod-privileged-1.2.3", "checksum": map[string]any{"algorithm": "SHA256", "checksumValue": hex.EncodeToString(upstreamSum[:])}}}}
+	if editSBOM != nil {
+		editSBOM(doc, pkg)
+	}
+	sbom, _ := json.Marshal(doc)
+	return map[string]string{suseWasmName: wasm, suseWasmBundleName: "wasm bundle", sourceArchiveName: "source archive", suseSBOMName: string(sbom),
+		suseSBOMBundleName: "sbom bundle", upstreamSBOMName: upstreamSBOM, upstreamSBOMBundleName: "upstream bundle"}
+}
+
+// publishedRelease gives the published release with files as its assets. If
+// edit is not nil, it changes the release.
+func publishedRelease(files map[string]string, edit func(rel map[string]any, assets []map[string]any)) string {
+	var assets []map[string]any
+	for _, name := range assetNames {
+		sum := sha256.Sum256([]byte(files[name]))
+		assets = append(assets, map[string]any{"name": name, "size": len(files[name]), "state": "uploaded", "digest": "sha256:" + hex.EncodeToString(sum[:])})
+	}
+	rel := map[string]any{"id": 42, "draft": false, "tag_name": testTag, "target_commitish": publishedSHA}
+	if edit != nil {
+		edit(rel, assets)
+	}
+	if _, ok := rel["assets"]; !ok {
+		rel["assets"] = assets
+	}
+	out, _ := json.Marshal(rel)
+	return string(out)
+}
+
+// publishedRules describe a run for a release that an earlier run published.
+func publishedRules(editSBOM func(doc, pkg map[string]any)) []rule {
+	files := publishedFiles(editSBOM)
+	var sbom any
+	_ = json.Unmarshal([]byte(files[suseSBOMName]), &sbom)
+	rules := []rule{
+		{prefix: ownRepo + "releases/tags/", out: publishedRelease(files, nil)},
+		{prefix: ownRepo + "git/ref/tags/", out: `{"object":{"type":"commit","sha":"` + publishedSHA + `"}}`},
+		{prefix: "gh api --hostname github.com repos/kubewarden/policies/releases/tags/", out: fmt.Sprintf(`{"tag_name":%q,"html_url":"https://github.com/kubewarden/policies/releases/tag/%s"}`, testTag, testTag)},
+		{prefix: "gh api --hostname github.com -H Accept: application/vnd.github.raw", out: "annotations:\n" +
+			"  io.kubewarden.policy.ociUrl: ghcr.io/kubewarden/policies/pod-privileged\n  io.kubewarden.policy.version: 1.2.3\n"},
+		{prefix: "cosign verify-blob ", out: ""},
+		{prefix: "kwctl digest registry://ghcr.io/rancher/suse-security-policies/pod-privileged:v1.2.3", out: "registry://ghcr.io/rancher/suse-security-policies/pod-privileged:v1.2.3@sha256:" + strings.Repeat("b", 64) + "\n"},
+		{prefix: "kwctl pull registry://" + suseRef + " -o $WORK/published/" + registryWasmName, write: files[suseWasmName]},
+		{prefix: spdxCheck, out: envelope(sbom)},
+		{prefix: signCheck, out: ""},
+		{prefix: ownVerify, out: "[]"},
+	}
+	for _, name := range assetNames {
+		rules = append(rules, rule{prefix: publishedDownload(name), write: files[name]})
+	}
+	return rules
+}
+
+func publishedDownload(name string) string {
+	return "gh release download " + testTag + " --repo github.com/rancher/suse-security-policies --pattern " + name + " --output $WORK/published/" + name + " --clobber"
 }
 
 // rerunRules describe a run after an earlier run that pushed and signed the
@@ -248,6 +322,15 @@ func TestRepackage(t *testing.T) {
 		sbom["creationInfo"].(map[string]any)["creators"] = []any{"Organization: SUSE", "Tool: suse-security-policies-" + testSHA}
 	}
 	staleErr := "differ from the release SBOM"
+	publishedWrites := []string{"-X ", "kwctl push", "cosign sign", "cosign attest", "gh release upload", "gh release create", "gh release edit", "gh release delete"}
+	var publishedDownloads []string
+	notRecorded := func(asset string) string {
+		sum := sha256.Sum256([]byte(publishedFiles(nil)[asset]))
+		return "does not record the SHA256 checksum " + hex.EncodeToString(sum[:]) + ` of the asset "` + asset + `"`
+	}
+	for _, name := range assetNames {
+		publishedDownloads = append(publishedDownloads, publishedDownload(name))
+	}
 	noWrite := []string{"cosign sign", "cosign attest", ownCreate, ownUpload, "-X PATCH", "-X DELETE"}
 	// published gives the rules of a draft that passes its check, but changes
 	// when it is published.
@@ -304,8 +387,45 @@ func TestRepackage(t *testing.T) {
 			err:    "Error: GET https://ghcr.io/v2/rancher/suse-security-policies/name_unknown/manifests/v1.2.3: unexpected status code 502 Bad Gateway", once: true,
 		}}, renamed(rerunRules())...), want: []string{"-X PATCH"}, forbid: []string{"kwctl push"},
 			count: map[string]int{"kwctl pull registry://ghcr.io/rancher/suse-security-policies/name_unknown:v1.2.3 ": 2}, waits: []time.Duration{2 * time.Second}},
-		{name: "already published", rules: append([]rule{{prefix: ownRepo + "releases/tags/", out: "{}"}}, rerunRules()...),
-			wantErr: "is already published", calls: 1},
+		{name: "published release verifies", rules: publishedRules(nil), forbid: publishedWrites, stdout: "### Verified the published release " + testTag,
+			want: append([]string{
+				"cosign verify-blob $WORK/published/" + suseWasmName + " --bundle $WORK/published/" + suseWasmBundleName + " --certificate-identity https://github.com/rancher/",
+				"cosign verify-blob $WORK/published/" + suseSBOMName + " --bundle $WORK/published/" + suseSBOMBundleName + " --certificate-identity https://github.com/rancher/",
+				"cosign verify-blob $WORK/published/" + upstreamSBOMName + " --bundle $WORK/published/" + upstreamSBOMBundleName + " --certificate-identity https://github.com/kubewarden/",
+				"cosign verify " + suseRef + " --new-bundle-format=false ", signCheck, spdxCheck, ownRepo + "git/ref/tags/" + testTag,
+			}, publishedDownloads...)},
+		{name: "dry run of a published release", dryRun: true, rules: publishedRules(nil), forbid: publishedWrites, stdout: "### Verified the published release " + testTag},
+		{name: "dry run of a published release without a workflow ref", dryRun: true, rules: publishedRules(nil), env: map[string]string{"GITHUB_WORKFLOW_REF": ""},
+			wantErr: "the run needs GITHUB_WORKFLOW_REF to verify the published release", forbid: append(publishedWrites, "gh release download", "cosign", "kwctl")},
+		{name: "published release misses an asset", rules: append([]rule{
+			{prefix: ownRepo + "releases/tags/", out: publishedRelease(publishedFiles(nil), func(rel map[string]any, assets []map[string]any) { rel["assets"] = slices.Delete(assets, 2, 3) })},
+			{prefix: publishedDownload(sourceArchiveName), err: "no assets match the file pattern", exit: 1},
+		}, publishedRules(nil)...), wantErr: afterCheck, forbid: publishedWrites, stdout: `the asset "` + sourceArchiveName + `" is missing`},
+		{name: "published asset has another digest", rules: append([]rule{{prefix: publishedDownload(sourceArchiveName), write: "other archive"}}, publishedRules(nil)...),
+			wantErr: afterCheck, forbid: publishedWrites, stdout: `the asset "` + sourceArchiveName + `" has the digest`},
+		{name: "published wasm signature does not verify", rules: append([]rule{{prefix: "cosign verify-blob $WORK/published/" + suseWasmName + " ", err: "Error: invalid signature", exit: 1}}, publishedRules(nil)...),
+			wantErr: afterCheck, forbid: publishedWrites, stdout: `the signature of the asset "` + suseWasmName + `" does not verify`},
+		{name: "registry holds another module than the release", rules: append([]rule{{prefix: "kwctl pull registry://" + suseRef, write: "other wasm"}}, publishedRules(nil)...),
+			wantErr: afterCheck, forbid: publishedWrites, stdout: "holds a module with sha256"},
+		{name: "SBOM attestation differs from the published SBOM", rules: append([]rule{{prefix: spdxCheck, out: envelope(map[string]any{"SPDXID": "SPDXRef-DOCUMENT"})}}, publishedRules(nil)...),
+			wantErr: afterCheck, forbid: publishedWrites, stdout: staleErr},
+		{name: "tag of the published release points at another commit", rules: append([]rule{{prefix: ownRepo + "git/ref/tags/", out: `{"object":{"type":"commit","sha":"` + testSHA + `"}}`}}, publishedRules(nil)...),
+			wantErr: afterCheck, forbid: publishedWrites, stdout: "points at the commit"},
+		{name: "published SBOM names another digest", rules: publishedRules(func(_, pkg map[string]any) {
+			pkg["externalRefs"] = []any{map[string]any{"referenceType": "purl", "referenceLocator": "pkg:oci/pod-privileged@sha256%3A" + strings.Repeat("f", 64)}}
+		}), wantErr: afterCheck, forbid: publishedWrites, stdout: "does not name the digest"},
+		{name: "published SBOM records another module checksum", rules: publishedRules(func(_, pkg map[string]any) {
+			pkg["checksums"] = []any{map[string]any{"algorithm": "SHA256", "checksumValue": strings.Repeat("f", 64)}}
+		}), wantErr: afterCheck, forbid: publishedWrites, stdout: notRecorded(suseWasmName)},
+		{name: "published SBOM records another upstream SBOM checksum", rules: publishedRules(func(doc, _ map[string]any) {
+			doc["externalDocumentRefs"].([]any)[0].(map[string]any)["checksum"] = map[string]any{"algorithm": "SHA256", "checksumValue": strings.Repeat("f", 64)}
+		}), wantErr: afterCheck, forbid: publishedWrites, stdout: notRecorded(upstreamSBOMName)},
+		{name: "published upstream SBOM signature does not verify", rules: append([]rule{{prefix: "cosign verify-blob $WORK/published/" + upstreamSBOMName + " ", err: "Error: invalid signature", exit: 1}}, publishedRules(nil)...),
+			wantErr: afterCheck, forbid: publishedWrites, stdout: `the signature of the asset "` + upstreamSBOMName + `" does not verify`},
+		{name: "legacy signature of the published module does not verify", rules: append([]rule{{prefix: ownVerify, err: "Error: no matching signatures: invalid signature", exit: 1}}, publishedRules(nil)...),
+			wantErr: afterCheck, forbid: publishedWrites, stdout: "no matching signatures"},
+		{name: "digest of the published module fails", rules: append([]rule{{prefix: "kwctl digest ", err: "Error: denied: permission denied"}}, publishedRules(nil)...),
+			wantErr: afterCheck, forbid: append(publishedWrites, "kwctl pull", ownVerify, signCheck, spdxCheck), stdout: "permission denied"},
 		{name: "tag without a release", rules: append([]rule{{prefix: ownRepo + "git/ref/tags/", out: "{}"}}, rerunRules()...),
 			wantErr: "exists without a published release", calls: 2},
 		{name: "tag lookup fails", rules: append([]rule{{prefix: ownRepo + "git/ref/tags/", err: "gh: Bad credentials (HTTP 401)"}}, rerunRules()...),

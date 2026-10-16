@@ -98,8 +98,11 @@ signing and distribution problems here.
   the destination registry, the run compares the module under the tag with
   its own module. If they are the same, an earlier run pushed it, and the run
   reuses the artifact. If they differ, the run stops.
-- Before it pushes anything, the run stops if the release of the version is
-  already published, or if its tag exists without a published release.
+- Before it pushes anything, the run looks for the release of the version.
+  If the release is already published, the run does not repackage the policy.
+  It only reads the published release and makes sure that it is correct. See
+  [Running a release again](#running-a-release-again). If the tag of the
+  version exists without a published release, the run stops.
 - The releases of this repository are immutable. After the publication, nobody
   can change the assets or the tag of a release. Thus the workflow uploads the
   assets to a draft release, and only then publishes the release.
@@ -185,7 +188,10 @@ For now, the workflow runs only when a person starts it by hand
 The discovery job runs `repackager discover`. The command lists the upstream
 releases and keeps the highest version of each policy. It removes
 prereleases and the policies that upstream does not publish. Then it removes
-each release that already has a published release in this repository.
+each release that already has a published release in this repository. If a
+person gives `policy-version`, the command keeps a published release. The
+`repackage` job then verifies it. See
+[Running a release again](#running-a-release-again).
 
 A published GitHub release in this repository is the only record that a
 version is published. A draft release does not count.
@@ -216,11 +222,14 @@ and the version from the matrix of the discovery job. It has one step,
 `make repackage`, which runs `repackager repackage`. The command runs these
 steps in one process. Each step is a log group:
 
-1. Find the upstream release. The step first makes sure that the release is
-   not published and that its tag does not exist. Then it finds the upstream
-   release of the policy name and the version, and it makes the same checks
-   as the discovery. It reads the policy id from the upstream `metadata.yml`
-   at the tag.
+1. Find the upstream release. The step first reads the release of the tag in
+   this repository. If the release is published, the run skips steps 2 to 11.
+   It runs the step "Verify the published release" instead. See
+   [Running a release again](#running-a-release-again). If the release is not
+   published, the step makes sure that its tag does not exist. Then it finds
+   the upstream release of the policy name and the version, and it makes the
+   same checks as the discovery. It reads the policy id from the upstream
+   `metadata.yml` at the tag.
 2. Verify the upstream policy signature.
 3. Annotate the policy.
 4. Download and verify the upstream SBOM. The step also reads the
@@ -286,7 +295,7 @@ artifact, and a dry run does not push.
 |---|---|
 | `check-config` | Fails if `config.yaml` misses a value that the pipeline needs |
 | `discover` | Prints the releases that still need a repackaging, as a JSON list. In GitHub Actions it also sets the outputs `matrix` and `count` and writes the job summary |
-| `repackage` | Repackages one policy version: it verifies, annotates, pushes, signs and publishes it. It stops at the first failure and returns the error |
+| `repackage` | Repackages one policy version: it verifies, annotates, pushes, signs and publishes it. It stops at the first failure and returns the error. For a published release, it only verifies the release |
 
 Flags:
 
@@ -296,7 +305,7 @@ Flags:
 | `--repository` | `discover`, `repackage` | Required. `owner/repo` of this repository |
 | `--sha` | `repackage` | Required. Commit of this repository that runs the pipeline |
 | `--policy-name` | `discover`, `repackage` | Required for `repackage`. The name of the upstream policy, for example `pod-privileged-policy`. For `discover`, it finds only this policy |
-| `--policy-version` | `discover`, `repackage` | Required for `repackage`. The version without the `v` prefix, for example `1.0.13`. For `discover`, it needs `--policy-name` |
+| `--policy-version` | `discover`, `repackage` | Required for `repackage`. The version without the `v` prefix, for example `1.0.13`. For `discover`, it needs `--policy-name`, and it keeps a published release, so that `repackage` verifies it |
 | `--dry-run` | `discover`, `repackage` | `repackage` pushes, signs and publishes nothing, but runs every check that only reads. `discover` marks the job summary as a dry run |
 | `--work-dir` | `repackage` | Keep the files of the run in this directory. Without it, the program uses a temporary directory and removes it at the end |
 
@@ -412,6 +421,50 @@ The deletion removes the attestation from the registry only. Its entry in
 the public Rekor transparency log stays, because nobody can delete a Rekor
 entry.
 
+If the release of the version is already published, the run does not
+repackage the policy. It runs one step, "Verify the published release". The
+step only reads, so a dry run does the same. It downloads the 7 assets of the
+release to the `published` directory in the work directory, and it makes
+these checks:
+
+- The release is not a draft, has the tag, and has exactly the 7 assets. Each
+  asset is uploaded and has a sha256 digest.
+- The tag points at the commit of the release. A release of an earlier run
+  has the commit of that run, so the step does not compare it with `--sha`.
+- The sha256 of each downloaded asset is equal to the digest of the asset.
+- The bundles of the module and of the SUSE SBOM verify with the identity of
+  this repository. The bundle of the upstream SBOM verifies with the upstream
+  identity.
+- `kwctl digest` gives the digest of the tag of the version in the
+  destination registry. The module that `kwctl pull` gets by that digest is
+  equal to the module of the release.
+- The legacy signature, the v3 bundle signature and the SBOM attestation of
+  that digest verify with the identity of this repository. The attested SBOM
+  is equal to the SUSE SBOM of the release.
+- The SUSE SBOM of the release records the sha256 of the module and the
+  sha256 of the upstream SBOM of the release. Its purl names the registry
+  digest.
+
+A new run cannot make the source archive and the bundles again with the same
+bytes. Thus the step does not compare them with a new build. It uses the
+digests and the signatures of the release. The source archive has no
+signature, so it gets only an integrity check: its sha256 must be equal to
+the digest that GitHub records for the asset. This check shows only that the
+download is complete. The step needs `GITHUB_WORKFLOW_REF` for the identity of this
+repository, also in a dry run. If every check passes, the job passes, and the
+job summary says that the run verified the published release. If a check
+fails, the job fails, and the job summary lists the failures. The release is
+immutable, so a person must check it by hand.
+
+Without `policy-version`, the `discover` job skips each published release.
+Thus the step runs in these cases:
+
+- A person starts the workflow with `policy-name` and `policy-version`.
+- A person runs the failed `repackage` job again with "Re-run failed jobs".
+  The new attempt uses the matrix of the first attempt.
+- Another run published the release after the `discover` job of this run.
+- A person runs `repackager repackage` by hand.
+
 The draft releases of failed runs stay until a run publishes the release.
 A draft of a failed run does not stop the next run. After the publication
 and its checks, the run deletes the old drafts for the tag. Before each
@@ -471,8 +524,13 @@ summary also says that the check failed. The run does not delete the old
 drafts for the tag then, so a person must also delete them by hand.
 
 The call that publishes the release can fail after GitHub published the
-release, for example when the connection breaks. Then the program does not
-read the release again, and a person must check the release by hand.
+release, for example when the connection breaks or GitHub loses the runner.
+Then the program does not read the release again, and the job fails. A person
+can start the workflow with `policy-name` and `policy-version`, or run the
+failed job again with "Re-run failed jobs". The new run finds the published
+release and verifies it. If every check passes, the job passes.
+If a check fails, a person must check the release by hand. See
+[Running a release again](#running-a-release-again).
 
 To try a failed release again:
 
@@ -635,7 +693,10 @@ gh workflow run sync-upstream-releases.yaml \
 ```
 
 You cannot publish a version again. The releases are immutable, and the
-workflow does not overwrite an OCI tag.
+workflow does not overwrite an OCI tag. Without `policy-version`, the
+`discover` job skips a published release. With `policy-version`, it keeps the
+release, and `repackager repackage` verifies it. It publishes nothing. See
+[Running a release again](#running-a-release-again).
 
 Run the workflow on `main`. Without `--ref`, `gh workflow run` uses `main`.
 A run on another branch fails. This is also true for a dry run.

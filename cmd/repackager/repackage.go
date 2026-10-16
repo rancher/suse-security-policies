@@ -36,7 +36,13 @@ const (
 	suseSBOMBundleName     = "policy-sbom.spdx.jsonl.bundle.sigstore"
 	sourceArchiveName      = "upstream-source.tar.gz"
 	releaseNotesName       = "release-notes.md"
+	publishedDirName       = "published"
+	registryWasmName       = "registry-policy.wasm"
 )
+
+var releaseAssets = []string{
+	suseWasmName, suseWasmBundleName, sourceArchiveName, suseSBOMName, suseSBOMBundleName, upstreamSBOMName, upstreamSBOMBundleName,
+}
 
 // The assets of the upstream release.
 const (
@@ -73,6 +79,7 @@ type repackageData struct {
 	upstreamDigest, upstreamRef, immutableRef                             string
 	destRef, sourceCommit, sourceSHA256, upstreamNamespace, suseNamespace string
 	ownIdentity                                                           []string
+	published                                                             map[string]any
 }
 
 func (d *repackageData) path(name string) string { return filepath.Join(d.workDir, name) }
@@ -159,11 +166,18 @@ const (
 	titleReleaseNotes   = "Render the release notes"
 	titleSign           = "Sign and attest"
 	titlePublish        = "Publish the release"
+	titleVerifyRelease  = "Verify the published release"
 )
 
 func repackageSteps(ctx context.Context, d *repackageData) error {
 	if err := findUpstream(ctx, d); err != nil {
 		return fmt.Errorf("%s: %w", titleFindUpstream, err)
+	}
+	if d.published != nil {
+		if err := verifyPublished(ctx, d); err != nil {
+			return fmt.Errorf("%s: %w", titleVerifyRelease, err)
+		}
+		return nil
 	}
 	if err := verifyUpstream(ctx, d); err != nil {
 		return fmt.Errorf("%s: %w", titleVerifyUpstream, err)
@@ -206,16 +220,22 @@ func repackageSteps(ctx context.Context, d *repackageData) error {
 }
 
 // findUpstream stops the run before anything is pushed or signed when our
-// release or tag exists. It checks the upstream release like discover.
+// tag exists without a release. It keeps a published release in
+// d.published, because the response of an earlier publication can get lost
+// after GitHub published the release. It checks the upstream release like
+// discover.
 func findUpstream(ctx context.Context, d *repackageData) error {
 	logf("::group::%s", titleFindUpstream)
 	defer logf("::endgroup::")
-	if exists, err := ghExists(ctx, "repos/"+d.repo+"/releases/tags/"+d.tag); err != nil {
+	published, err := decode(githubAPI(ctx, "repos/"+d.repo+"/releases/tags/"+d.tag))
+	if err == nil {
+		var ok bool
+		if d.published, ok = published.(map[string]any); !ok {
+			return fmt.Errorf("the response for the release %s is not a JSON object", d.tag)
+		}
+	} else if !strings.Contains(err.Error(), "HTTP 404") {
 		return err
-	} else if exists {
-		return fmt.Errorf("the release %s is already published", d.tag)
-	}
-	if exists, err := ghExists(ctx, "repos/"+d.repo+"/git/ref/tags/"+d.tag); err != nil {
+	} else if exists, err := ghExists(ctx, "repos/"+d.repo+"/git/ref/tags/"+d.tag); err != nil {
 		return err
 	} else if exists {
 		return fmt.Errorf("the tag %s exists without a published release. A person must check the tag", d.tag)
@@ -346,11 +366,8 @@ func push(ctx context.Context, d *repackageData) error {
 		}
 		return err
 	}
-	out, err := kwctlRead(ctx, d.id, "digest", "registry://"+d.destRef)
-	ref := repo + "@" + strings.TrimSpace(string(out[bytes.LastIndexByte(out, '@')+1:]))
-	if err == nil && !digestPattern.MatchString(strings.TrimPrefix(ref, repo+"@")) {
-		err = fmt.Errorf("kwctl digest %s printed %q, which has no sha256 digest", d.destRef, strings.TrimSpace(string(out)))
-	} else if err == nil {
+	ref, err := digestRef(ctx, d.id, repo, d.destRef)
+	if err == nil {
 		_, err = kwctlRead(ctx, d.id, "pull", "registry://"+ref, "-o", existing)
 	}
 	got, _ := fileSHA256(existing)
@@ -359,6 +376,15 @@ func push(ctx context.Context, d *repackageData) error {
 	}
 	d.immutableRef = ref
 	return err
+}
+
+func digestRef(ctx context.Context, id, repo, tagRef string) (string, error) {
+	out, err := kwctlRead(ctx, id, "digest", "registry://"+tagRef)
+	ref := repo + "@" + strings.TrimSpace(string(out[bytes.LastIndexByte(out, '@')+1:]))
+	if err == nil && !digestPattern.MatchString(strings.TrimPrefix(ref, repo+"@")) {
+		err = fmt.Errorf("kwctl digest %s printed %q, which has no sha256 digest", tagRef, strings.TrimSpace(string(out)))
+	}
+	return ref, err
 }
 
 // upstreamSBOM verifies the copy that goes into the release.
@@ -561,21 +587,28 @@ type releaseFile struct {
 	sha256 string
 }
 
-// checkRelease treats a missing or null digest as a difference, so that a
-// change of the GitHub API makes the check fail.
 func checkRelease(rel any, d *repackageData, id int64, files map[string]releaseFile, wantDraft bool) error {
 	var errs []error
 	if got, ok := get(rel, "id").(float64); !ok || got != float64(id) {
 		errs = append(errs, fmt.Errorf("the id is %v instead of %d", get(rel, "id"), id))
 	}
+	if str(rel, "target_commitish") != d.sha {
+		errs = append(errs, fmt.Errorf("target_commitish is %q instead of %q", str(rel, "target_commitish"), d.sha))
+	}
+	return errors.Join(append(errs, checkReleaseAssets(rel, d.tag, files, wantDraft)...)...)
+}
+
+// checkReleaseAssets treats a missing or null digest as a difference, so
+// that a change of the GitHub API makes the check fail. A file with no
+// sha256 is a file that the run could not download, so only the form of its
+// digest counts.
+func checkReleaseAssets(rel any, tag string, files map[string]releaseFile, wantDraft bool) []error {
+	var errs []error
 	if get(rel, "draft") != wantDraft {
 		errs = append(errs, fmt.Errorf("draft is %v instead of %v", get(rel, "draft"), wantDraft))
 	}
-	if str(rel, "tag_name") != d.tag {
-		errs = append(errs, fmt.Errorf("tag_name is %q instead of %q", str(rel, "tag_name"), d.tag))
-	}
-	if str(rel, "target_commitish") != d.sha {
-		errs = append(errs, fmt.Errorf("target_commitish is %q instead of %q", str(rel, "target_commitish"), d.sha))
+	if str(rel, "tag_name") != tag {
+		errs = append(errs, fmt.Errorf("tag_name is %q instead of %q", str(rel, "tag_name"), tag))
 	}
 	seen := map[string]bool{}
 	for _, a := range list(rel, "assets") {
@@ -592,6 +625,12 @@ func checkRelease(rel any, d *repackageData, id int64, files map[string]releaseF
 		if str(a, "state") != "uploaded" {
 			errs = append(errs, fmt.Errorf("the asset %q has the state %v instead of \"uploaded\"", name, get(a, "state")))
 		}
+		if f.sha256 == "" {
+			if !digestPattern.MatchString(str(a, "digest")) {
+				errs = append(errs, fmt.Errorf("the asset %q has the digest %v, which is not a sha256 digest", name, get(a, "digest")))
+			}
+			continue
+		}
 		if size, _ := get(a, "size").(float64); size != float64(f.size) {
 			errs = append(errs, fmt.Errorf("the asset %q has the size %v instead of %d", name, get(a, "size"), f.size))
 		}
@@ -604,7 +643,7 @@ func checkRelease(rel any, d *repackageData, id int64, files map[string]releaseF
 			errs = append(errs, fmt.Errorf("the asset %q is missing", name))
 		}
 	}
-	return errors.Join(errs...)
+	return errs
 }
 
 // publish uploads to a draft first, because only a draft can change.
@@ -612,9 +651,9 @@ func checkRelease(rel any, d *repackageData, id int64, files map[string]releaseF
 func publish(ctx context.Context, d *repackageData) error {
 	logf("::group::%s", titlePublish)
 	defer logf("::endgroup::")
-	assets := []string{
-		d.path(suseWasmName), d.path(suseWasmBundleName), d.path(sourceArchiveName), d.path(suseSBOMName),
-		d.path(suseSBOMBundleName), d.path(upstreamSBOMName), d.path(upstreamSBOMBundleName),
+	var assets []string
+	for _, name := range releaseAssets {
+		assets = append(assets, d.path(name))
 	}
 	files := map[string]releaseFile{}
 	for _, a := range assets {
@@ -716,7 +755,7 @@ func publish(ctx context.Context, d *repackageData) error {
 		failure = err.Error()
 	} else if err := deleteOldDrafts(ctx, d, int64(id)); err != nil {
 		// The run does not fail, because the release is correct and a rerun
-		// for a published release always stops.
+		// for a published release does not change it.
 		cleanupFailure = err.Error()
 		logf("::warning::%s", escapeData(fmt.Sprintf("the release %s is published, but the run cannot delete one or more old drafts for the tag: %v", d.tag, err)))
 	}
@@ -764,4 +803,130 @@ func deleteOldDrafts(ctx context.Context, d *repackageData, keep int64) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// verifyPublished only reads, so it runs the same way in a dry run. A new
+// run cannot make the source archive and the sign-blob bundles again with
+// the same bytes, so the checks use the digests and the signatures of the
+// release. The source archive has no signature, so only its digest is
+// checked.
+func verifyPublished(ctx context.Context, d *repackageData) error {
+	logf("::group::%s", titleVerifyRelease)
+	defer logf("::endgroup::")
+	own := d.ownIdentity
+	if own == nil {
+		var err error
+		if own, err = signingIdentity(d.repo); err != nil {
+			return fmt.Errorf("the run needs GITHUB_WORKFLOW_REF to verify the published release %s: %w", d.tag, err)
+		}
+	}
+	err := errors.Join(publishedErrors(ctx, d, own)...)
+	failure := ""
+	if err != nil {
+		failure = err.Error()
+	}
+	if err := appendEnvFile("GITHUB_STEP_SUMMARY", cmdOut, publishedSummary(d, failure)); err != nil {
+		logf("::warning::%s", escapeData(err.Error()))
+	}
+	if err != nil {
+		return fmt.Errorf("the release %s is published and immutable, but a check of the published release failed. A person must check the release by hand: %w", d.tag, err)
+	}
+	return nil
+}
+
+func publishedErrors(ctx context.Context, d *repackageData, own []string) []error {
+	dir := d.path(publishedDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return []error{err}
+	}
+	path := func(name string) string { return filepath.Join(dir, name) }
+	var errs []error
+	ref, err := decode(githubAPI(ctx, "repos/"+d.repo+"/git/ref/tags/"+d.tag))
+	// A release of an earlier run has the commit of that run, not d.sha.
+	commit := str(d.published, "target_commitish")
+	if typ, sha := str(ref, "object", "type"), str(ref, "object", "sha"); err == nil && (typ != "commit" || sha != commit || !shaPattern.MatchString(sha)) {
+		err = fmt.Errorf("the tag %s points at the %s %q instead of the commit %q of the release", d.tag, typ, sha, commit)
+	}
+	errs = append(errs, err)
+	files := map[string]releaseFile{}
+	for _, name := range releaseAssets {
+		files[name] = releaseFile{}
+		if _, err := githubReleaseDownload(ctx, d.tag, "--repo", "github.com/"+d.repo, "--pattern", name, "--output", path(name), "--clobber"); err != nil {
+			errs = append(errs, fmt.Errorf("cannot download the asset %q: %w", name, err))
+			continue
+		}
+		info, err := os.Stat(path(name))
+		sum, err2 := fileSHA256(path(name))
+		if err = errors.Join(err, err2); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		files[name] = releaseFile{info.Size(), sum}
+	}
+	errs = append(errs, checkReleaseAssets(d.published, d.tag, files, false)...)
+	have := func(names ...string) bool {
+		return !slices.ContainsFunc(names, func(n string) bool { return files[n].sha256 == "" })
+	}
+	for _, b := range []struct {
+		blob, bundle string
+		identity     []string
+	}{{suseWasmName, suseWasmBundleName, own}, {suseSBOMName, suseSBOMBundleName, own}, {upstreamSBOMName, upstreamSBOMBundleName, d.upstreamIdentity()}} {
+		if !have(b.blob, b.bundle) {
+			continue
+		}
+		if err := verifyBlob(ctx, path(b.blob), path(b.bundle), b.identity); err != nil {
+			errs = append(errs, fmt.Errorf("the signature of the asset %q does not verify: %w", b.blob, err))
+		}
+	}
+	repo := d.cfg.Destination.Registry + "/" + d.id
+	d.destRef = repo + ":v" + d.version
+	immutableRef, err := digestRef(ctx, d.id, repo, d.destRef)
+	if err != nil {
+		return append(errs, err)
+	}
+	d.immutableRef = immutableRef
+	wasmSum := files[suseWasmName].sha256
+	if _, err := kwctlRead(ctx, d.id, "pull", "registry://"+immutableRef, "-o", path(registryWasmName)); err != nil {
+		errs = append(errs, err)
+	} else if got, _ := fileSHA256(path(registryWasmName)); have(suseWasmName) && got != wasmSum {
+		errs = append(errs, fmt.Errorf("%s holds a module with sha256 %s, but the asset %q of the release has sha256 %s", immutableRef, got, suseWasmName, wasmSum))
+	}
+	if _, err := verifyLegacySignature(ctx, immutableRef, own); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := verifyAttestation(ctx, immutableRef, signaturePredicateType, own); err != nil {
+		errs = append(errs, err)
+	}
+	out, err := verifyAttestation(ctx, immutableRef, "spdxjson", own)
+	if err == nil && have(suseSBOMName) {
+		err = sameSBOM(immutableRef, out, path(suseSBOMName))
+	}
+	errs = append(errs, err)
+	if !have(suseSBOMName, suseWasmName) {
+		return errs
+	}
+	doc, err := readJSON(path(suseSBOMName))
+	if err != nil {
+		return append(errs, fmt.Errorf("parse the asset %q: %w", suseSBOMName, err))
+	}
+	if upstreamSum := files[upstreamSBOMName].sha256; have(upstreamSBOMName) && !slices.ContainsFunc(list(doc, "externalDocumentRefs"), func(r any) bool {
+		return str(r, "checksum", "algorithm") == "SHA256" && str(r, "checksum", "checksumValue") == upstreamSum
+	}) {
+		errs = append(errs, fmt.Errorf("the asset %q does not record the SHA256 checksum %s of the asset %q", suseSBOMName, upstreamSum, upstreamSBOMName))
+	}
+	i := slices.IndexFunc(list(doc, "packages"), func(p any) bool { return str(p, "SPDXID") == "SPDXRef-Package-"+d.id })
+	if i < 0 {
+		return append(errs, fmt.Errorf("the asset %q has no package SPDXRef-Package-%s", suseSBOMName, d.id))
+	}
+	pkg := list(doc, "packages")[i]
+	if !slices.ContainsFunc(list(pkg, "checksums"), func(c any) bool { return str(c, "algorithm") == "SHA256" && str(c, "checksumValue") == wasmSum }) {
+		errs = append(errs, fmt.Errorf("the asset %q does not record the SHA256 checksum %s of the asset %q", suseSBOMName, wasmSum, suseWasmName))
+	}
+	_, digest, _ := strings.Cut(immutableRef, "@")
+	if !slices.ContainsFunc(list(pkg, "externalRefs"), func(r any) bool {
+		return str(r, "referenceType") == "purl" && strings.Contains(str(r, "referenceLocator"), "@"+strings.Replace(digest, ":", "%3A", 1))
+	}) {
+		errs = append(errs, fmt.Errorf("the purl in the asset %q does not name the digest %s", suseSBOMName, digest))
+	}
+	return errs
 }
