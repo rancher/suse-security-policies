@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 )
@@ -35,18 +36,23 @@ type fake struct {
 	work  string
 	rules []rule
 	calls []string
+	waits []time.Duration
 }
 
-// newFake replaces run until the test ends. It also discards the log and
+// newFake replaces run and sleep until the test ends. It also discards the log and
 // clears the GitHub Actions files, so that a test run in a workflow does not
 // write to them. It sets GITHUB_WORKFLOW_REF to the workflow of this
 // repository, so that the signing identity does not depend on the workflow
 // that runs the test.
 func newFake(t *testing.T, work string, rules ...rule) *fake {
 	f := &fake{t: t, work: work, rules: rules}
-	oldRun, oldLog := run, logOut
+	oldRun, oldSleep, oldLog := run, sleep, logOut
 	run, logOut = f.run, io.Discard
-	t.Cleanup(func() { run, logOut = oldRun, oldLog })
+	sleep = func(ctx context.Context, d time.Duration) error {
+		f.waits = append(f.waits, d)
+		return ctx.Err()
+	}
+	t.Cleanup(func() { run, sleep, logOut = oldRun, oldSleep, oldLog })
 	t.Setenv("GITHUB_OUTPUT", "")
 	t.Setenv("GITHUB_STEP_SUMMARY", "")
 	t.Setenv("GITHUB_WORKFLOW_REF", "rancher/suse-security-policies/.github/workflows/sync-upstream-releases.yaml@refs/heads/main")

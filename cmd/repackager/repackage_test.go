@@ -206,6 +206,12 @@ func joined(fns ...func(work string) string) func(work string) string {
 	}
 }
 
+// thrice gives a rule for each of the three tries of a read.
+func thrice(r rule) []rule {
+	r.once = true
+	return []rule{r, r, r}
+}
+
 // renamed gives the policy the id name_unknown, which looks like the OCI
 // error code NAME_UNKNOWN.
 func renamed(rules []rule) []rule {
@@ -260,10 +266,11 @@ func TestRepackage(t *testing.T) {
 		before  map[string]string // a command line that contains the key must not run after the first one that contains the value
 		// command lines that contain these strings run one after the other, with no other command between them
 		sequence []string
-		calls    int    // if not 0, the exact number of calls
-		stdout   string // if not empty, stdout must contain it
-		noStdout string // if not empty, stdout must not contain it
-		noCalls  bool   // no command may run
+		calls    int             // if not 0, the exact number of calls
+		waits    []time.Duration // if not nil, the exact waits before the retries
+		stdout   string          // if not empty, stdout must contain it
+		noStdout string          // if not empty, stdout must not contain it
+		noCalls  bool            // no command may run
 	}{
 		{name: "dry run", dryRun: true, rules: freshRules(), forbid: append(signOrPublish, "cosign sign-blob"),
 			count: map[string]int{"sbom-utility validate --input-file $WORK/" + draftSUSESBOMName: 1, "sbom-utility validate": 1}},
@@ -282,7 +289,7 @@ func TestRepackage(t *testing.T) {
 				"kwctl pull registry://" + suseRef + " -o $WORK/existing-policy.wasm",
 				"cosign verify " + suseRef + " --new-bundle-format=false --output json --certificate-identity https://github.com/rancher/suse-security-policies/.github/workflows/sync-upstream-releases.yaml@refs/heads/main --certificate-oidc-issuer https://token.actions.githubusercontent.com"}},
 		{name: "destination pull denied", rules: append([]rule{{prefix: destPull, err: "Error: denied: permission denied"}}, rerunRules()...),
-			wantErr: "cannot tell whether", forbid: signOrPublish},
+			wantErr: "cannot tell whether", forbid: signOrPublish, count: map[string]int{destPull: 3}},
 		{name: "digest output without a digest", rules: append([]rule{
 			{prefix: "kwctl digest ", out: "registry://ghcr.io/rancher/suse-security-policies/pod-privileged:v1.2.3\n"},
 		}, rerunRules()...), wantErr: "has no sha256 digest", forbid: signOrPublish},
@@ -290,7 +297,13 @@ func TestRepackage(t *testing.T) {
 		{name: "policy id looks like an error code", rules: append([]rule{{
 			prefix: "kwctl pull registry://ghcr.io/rancher/suse-security-policies/name_unknown:v1.2.3 ",
 			err:    "Error: Registry error: url https://ghcr.io/v2/rancher/suse-security-policies/name_unknown/manifests/v1.2.3, envelope: OCI API errors: [OCI API error: denied]",
-		}}, renamed(rerunRules())...), wantErr: "cannot tell whether", forbid: signOrPublish},
+		}}, renamed(rerunRules())...), wantErr: "cannot tell whether", forbid: signOrPublish,
+			count: map[string]int{"kwctl pull registry://ghcr.io/rancher/suse-security-policies/name_unknown:v1.2.3 ": 3}},
+		{name: "policy id looks like an error code in a short error", rules: append([]rule{{
+			prefix: "kwctl pull registry://ghcr.io/rancher/suse-security-policies/name_unknown:v1.2.3 ",
+			err:    "Error: GET https://ghcr.io/v2/rancher/suse-security-policies/name_unknown/manifests/v1.2.3: unexpected status code 502 Bad Gateway", once: true,
+		}}, renamed(rerunRules())...), want: []string{"-X PATCH"}, forbid: []string{"kwctl push"},
+			count: map[string]int{"kwctl pull registry://ghcr.io/rancher/suse-security-policies/name_unknown:v1.2.3 ": 2}, waits: []time.Duration{2 * time.Second}},
 		{name: "already published", rules: append([]rule{{prefix: ownRepo + "releases/tags/", out: "{}"}}, rerunRules()...),
 			wantErr: "is already published", calls: 1},
 		{name: "tag without a release", rules: append([]rule{{prefix: ownRepo + "git/ref/tags/", out: "{}"}}, rerunRules()...),
@@ -298,13 +311,14 @@ func TestRepackage(t *testing.T) {
 		{name: "tag lookup fails", rules: append([]rule{{prefix: ownRepo + "git/ref/tags/", err: "gh: Bad credentials (HTTP 401)"}}, rerunRules()...),
 			wantErr: "HTTP 401", calls: 2},
 		{name: "upstream tag lookup fails", rules: append([]rule{{prefix: "gh api --hostname github.com repos/kubewarden/policies/git/tags/", err: "gh: Server Error (HTTP 502)"}}, freshRules()...),
-			wantErr: "HTTP 502", forbid: append(signOrPublish, "/tarball/", destPull)},
+			wantErr: "HTTP 502", forbid: append(signOrPublish, "/tarball/", destPull), count: map[string]int{"repos/kubewarden/policies/git/tags/": 3},
+			waits: []time.Duration{2 * time.Second, 8 * time.Second}},
 		{name: "upstream tag names another commit", rules: append([]rule{{prefix: "gh api --hostname github.com repos/kubewarden/policies/git/tags/", out: `{"object":{"type":"commit","sha":"` + strings.Repeat("e", 40) + `"}}`}}, freshRules()...),
 			wantErr: "the upstream SBOM records the commit", forbid: append(signOrPublish, "/tarball/", destPull)},
 		{name: "upstream SBOM signature does not verify", rules: append([]rule{{prefix: "cosign verify-blob $WORK/" + upstreamSBOMName + " ", err: "Error: invalid signature", exit: 1}}, freshRules()...),
-			wantErr: "invalid signature", forbid: append(signOrPublish, "/tarball/", destPull)},
+			wantErr: "invalid signature", forbid: append(signOrPublish, "/tarball/", destPull), count: map[string]int{"cosign verify-blob": 3}},
 		{name: "upstream SBOM is missing", rules: append([]rule{{prefix: "gh release download " + testTag + " --repo github.com/kubewarden/policies --pattern " + upstreamSBOMAsset + " ", err: "no assets match the file pattern", exit: 1}}, freshRules()...),
-			wantErr: "no assets match the file pattern", forbid: append(signOrPublish, destPull)},
+			wantErr: "no assets match the file pattern", forbid: append(signOrPublish, destPull), count: map[string]int{"gh release download": 1}},
 		{name: "upstream checks before the push", rules: freshRules(), want: []string{"kwctl push"},
 			before: map[string]string{"gh release download ": destPull, "repos/kubewarden/policies/git/": destPull, "/tarball/": destPull, draftSUSESBOMName: destPull}},
 		{name: "SUSE SBOM not valid", rules: append([]rule{{prefix: "sbom-utility validate ", out: "the license is not valid", err: "sbom-utility: exit status 1"}}, freshRules()...),
@@ -344,9 +358,9 @@ func TestRepackage(t *testing.T) {
 			{prefix: ownList, out: `[[{"tag_name":"` + testTag + `","draft":true,"id":"7"},{"tag_name":"` + testTag + `","draft":false,"id":8}]]`, once: true},
 		}, rerunRules()...), want: []string{ownList}, forbid: []string{deleteCmd, "releases/7", "releases/8"}, noStdout: cleanupFailed},
 		{name: "deletion of an old draft fails", rules: append(append(oldDraft(true), rule{prefix: deleteCmd, err: "gh: Server Error (HTTP 502)"}), rerunRules()...),
-			want: []string{deleteCmd + "repos/rancher/suse-security-policies/releases/7"}, stdout: cleanupFailed},
-		{name: "list after the publication fails", rules: append([]rule{{prefix: ownList, err: "gh: Server Error (HTTP 502)", once: true}}, rerunRules()...),
-			want: []string{ownList}, forbid: []string{deleteCmd}, stdout: cleanupFailed},
+			count: map[string]int{deleteCmd + "repos/rancher/suse-security-policies/releases/7": 1}, stdout: cleanupFailed, waits: []time.Duration{}},
+		{name: "list after the publication fails", rules: append(thrice(rule{prefix: ownList, err: "gh: Server Error (HTTP 502)"}), rerunRules()...),
+			count: map[string]int{ownList: 3}, forbid: []string{deleteCmd}, stdout: cleanupFailed},
 		{name: "no deletion after a failed check", rules: append(append(oldDraft(true), rule{prefix: deleteCmd, out: ""}),
 			published(func(_ map[string]any, assets []map[string]any) { assets[0]["digest"] = otherDigest })...),
 			wantErr: afterCheck, forbid: []string{ownList, deleteCmd, ownRepo + "releases/7"}},
@@ -397,8 +411,8 @@ func TestRepackage(t *testing.T) {
 			wantErr: `tag_name is "other/v1.2.3"`, forbid: noPatch},
 		{name: "draft has another id", rules: append([]rule{draftRead(func(rel map[string]any, _ []map[string]any) { rel["id"] = 43 })}, rerunRules()...),
 			wantErr: "the id is 43 instead of 42", forbid: noPatch},
-		{name: "draft read fails", rules: append([]rule{{prefix: ownRepo + "releases/42", err: "gh: Server Error (HTTP 502)", once: true}}, rerunRules()...),
-			wantErr: draftCheck, forbid: noPatch},
+		{name: "draft read fails", rules: append(thrice(rule{prefix: ownRepo + "releases/42", err: "gh: Server Error (HTTP 502)"}), rerunRules()...),
+			wantErr: draftCheck, forbid: noPatch, count: map[string]int{ownRepo + "releases/42": 3}},
 		{name: "release published before the publication", rules: append([]rule{
 			{prefix: ownRepo + "releases/tags/", err: "gh: Not Found (HTTP 404)", once: true},
 			{prefix: ownRepo + "releases/tags/", out: "{}"},
@@ -452,9 +466,10 @@ func TestRepackage(t *testing.T) {
 		{name: "creation fails", rules: append([]rule{{prefix: ownCreate, err: "gh: Validation Failed (HTTP 422)"}}, rerunRules()...),
 			wantErr: "HTTP 422", forbid: noUpload},
 		{name: "upload fails", rules: append([]rule{{prefix: ownUpload + "42/assets?name=" + sourceArchiveName + " ", err: "gh: Server Error (HTTP 502)"}}, rerunRules()...),
-			wantErr: "cannot upload " + sourceArchiveName, forbid: []string{"-X PATCH", "?name=" + suseSBOMName + " "}},
+			wantErr: "cannot upload " + sourceArchiveName, forbid: []string{"-X PATCH", "?name=" + suseSBOMName + " "},
+			count: map[string]int{"?name=" + sourceArchiveName + " ": 1}, waits: []time.Duration{}},
 		{name: "publication fails", rules: append([]rule{{prefix: "gh api --hostname github.com -X PATCH ", err: "gh: Server Error (HTTP 502)"}}, rerunRules()...),
-			wantErr: "HTTP 502", count: map[string]int{ownUpload + "42/assets?name=": 7, "-X PATCH": 1}},
+			wantErr: "HTTP 502", count: map[string]int{ownUpload + "42/assets?name=": 7, "-X PATCH": 1}, waits: []time.Duration{}},
 		{name: "stale SBOM attestation", rules: append([]rule{{prefix: spdxCheck, fn: attested(staleSBOM)}}, rerunRules()...), wantErr: staleErr, forbid: noWrite},
 		{name: "fresh run", rules: freshRules(), want: []string{"kwctl push", ownCreate},
 			count: map[string]int{"cosign attest --yes --type spdxjson ": 1, "cosign sign --yes --new-bundle-format=false ": 1, "cosign sign --yes --use-signing-config=true ": 1, "-X PATCH": 1,
@@ -468,16 +483,19 @@ func TestRepackage(t *testing.T) {
 		{name: "no matching legacy signature", rules: append([]rule{{prefix: ownVerify, err: "Error: no matching signatures: none of the expected identities matched", exit: 12, once: true}}, rerunRules()...),
 			forbid: []string{"cosign attest", "cosign sign --yes --use-signing-config=true"}, count: map[string]int{"cosign sign --yes --new-bundle-format=false ": 1}},
 		// A short network error must not hide the stale attestation of an earlier run.
-		{name: "SBOM check fails with a network error", rules: append([]rule{
-			{prefix: spdxCheck, err: timeout, exit: 1, once: true},
-			{prefix: spdxCheck, fn: attested(staleSBOM)},
-		}, rerunRules()...), wantErr: "cannot tell whether " + suseRef + " already has an SBOM attestation", forbid: noWrite},
-		{name: "legacy check fails with a network error", rules: append([]rule{{prefix: ownVerify, err: badGate, exit: 1, once: true}}, freshRules()...),
-			wantErr: "cannot tell whether " + suseRef + " already has a legacy signature", forbid: noWrite},
-		{name: "legacy check fails with a missing tag", rules: append([]rule{{prefix: ownVerify, err: "Error: image tag not found", exit: 11, once: true}}, freshRules()...),
-			wantErr: "cannot tell whether", forbid: noWrite},
-		{name: "v3 check fails with a network error", rules: append([]rule{{prefix: signCheck, err: tooMany, exit: 1, once: true}}, freshRules()...),
-			wantErr: "cannot tell whether " + suseRef + " already has a v3 bundle signature", forbid: noWrite},
+		{name: "SBOM check fails with a network error", rules: append(append(thrice(rule{prefix: spdxCheck, err: timeout, exit: 1}),
+			rule{prefix: spdxCheck, fn: attested(staleSBOM)}), rerunRules()...),
+			wantErr: "cannot tell whether " + suseRef + " already has an SBOM attestation", forbid: noWrite, count: map[string]int{spdxCheck: 3}},
+		// The retry passes the output of the last try to sameSBOM.
+		{name: "SBOM check passes on the second try with a stale attestation", rules: append([]rule{{prefix: spdxCheck, err: timeout, exit: 1, once: true},
+			{prefix: spdxCheck, fn: attested(staleSBOM)}}, rerunRules()...),
+			wantErr: staleErr, forbid: noWrite, count: map[string]int{spdxCheck: 2}, waits: []time.Duration{2 * time.Second}},
+		{name: "legacy check fails with a network error", rules: append(thrice(rule{prefix: ownVerify, err: badGate, exit: 1}), freshRules()...),
+			wantErr: "cannot tell whether " + suseRef + " already has a legacy signature", forbid: noWrite, count: map[string]int{ownVerify: 3}},
+		{name: "legacy check fails with a missing tag", rules: append(thrice(rule{prefix: ownVerify, err: "Error: image tag not found", exit: 11}), freshRules()...),
+			wantErr: "cannot tell whether", forbid: noWrite, count: map[string]int{ownVerify: 3}},
+		{name: "v3 check fails with a network error", rules: append(thrice(rule{prefix: signCheck, err: tooMany, exit: 1}), freshRules()...),
+			wantErr: "cannot tell whether " + suseRef + " already has a v3 bundle signature", forbid: noWrite, count: map[string]int{signCheck: 3}},
 		{name: "one stale and one current SBOM attestation", rules: append([]rule{{prefix: spdxCheck, fn: joined(attested(nil), attested(staleSBOM))}}, rerunRules()...),
 			wantErr: staleErr, forbid: noWrite},
 		{name: "stale SBOM attestation after the attestation", rules: append([]rule{
@@ -493,6 +511,26 @@ func TestRepackage(t *testing.T) {
 		// An earlier run wrote only the signatures.
 		{name: "signed but SBOM not attested", rules: append([]rule{{prefix: spdxCheck, err: noSPDXAtt, exit: 1, once: true}}, rerunRules()...),
 			forbid: []string{"cosign sign --"}, count: map[string]int{"cosign attest --yes --type spdxjson ": 1, "-X PATCH": 1}},
+		{name: "read passes on the second try", rules: append([]rule{{prefix: "gh api --hostname github.com repos/kubewarden/policies/releases/tags/", err: "gh: Server Error (HTTP 502)", once: true}}, rerunRules()...),
+			want: []string{"-X PATCH"}, count: map[string]int{"gh api --hostname github.com repos/kubewarden/policies/releases/tags/": 2}, waits: []time.Duration{2 * time.Second}},
+		{name: "rate limit on every try", rules: append([]rule{{prefix: "gh api --hostname github.com repos/kubewarden/policies/releases/tags/", err: "gh: API rate limit exceeded (HTTP 429)"}}, rerunRules()...),
+			wantErr: "HTTP 429", count: map[string]int{"gh api --hostname github.com repos/kubewarden/policies/releases/tags/": 3}, waits: []time.Duration{2 * time.Second, 8 * time.Second}},
+		// rerunRules answer each check for our release and tag with a 404.
+		{name: "no retry of a 404", rules: rerunRules(), want: []string{"-X PATCH"},
+			count: map[string]int{ownRepo + "releases/tags/": 2, ownRepo + "git/ref/tags/": 3}, waits: []time.Duration{}},
+		{name: "no retry of a missing destination tag", rules: freshRules(), want: []string{"kwctl push"}, count: map[string]int{destPull: 1}, waits: []time.Duration{}},
+		{name: "destination pull passes on the second try", rules: append([]rule{{prefix: destPull, err: "Error: read tcp: connection reset by peer", once: true}}, rerunRules()...),
+			want: []string{"-X PATCH"}, forbid: []string{"kwctl push"}, count: map[string]int{destPull: 2}, waits: []time.Duration{2 * time.Second}},
+		{name: "signature check passes on the second try", rules: append([]rule{{prefix: ownVerify, err: timeout, exit: 1, once: true}}, rerunRules()...),
+			want: []string{"-X PATCH"}, forbid: []string{"cosign sign --"}, count: map[string]int{ownVerify: 3}, waits: []time.Duration{2 * time.Second}},
+		{name: "no retry when nothing is signed", rules: freshRules(), want: []string{"-X PATCH"},
+			count: map[string]int{ownVerify: 2, spdxCheck: 2, signCheck: 2}, waits: []time.Duration{}},
+		{name: "no retry of a failed creation", rules: append([]rule{{prefix: ownCreate, err: "gh: Server Error (HTTP 502)"}}, rerunRules()...),
+			wantErr: "HTTP 502", forbid: noUpload, count: map[string]int{ownCreate: 1}, waits: []time.Duration{}},
+		{name: "no retry of a failed push", rules: append([]rule{{prefix: "kwctl push", err: "Error: 502 Bad Gateway"}}, freshRules()...),
+			wantErr: "502 Bad Gateway", forbid: noWrite, count: map[string]int{"kwctl push": 1}, waits: []time.Duration{}},
+		{name: "no retry of a failed signature", rules: append([]rule{{prefix: "cosign sign --", err: timeout, exit: 1}}, freshRules()...),
+			wantErr: "i/o timeout", forbid: []string{ownCreate}, count: map[string]int{"cosign sign --": 1}, waits: []time.Duration{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -523,6 +561,9 @@ func TestRepackage(t *testing.T) {
 			}
 			if tt.calls != 0 && len(f.calls) != tt.calls {
 				t.Errorf("repackage ran %d commands instead of %d:\n%s", len(f.calls), tt.calls, strings.Join(f.calls, "\n"))
+			}
+			if tt.waits != nil && !slices.Equal(f.waits, tt.waits) {
+				t.Errorf("repackage waited %v instead of %v", f.waits, tt.waits)
 			}
 			for _, call := range f.calls {
 				for _, s := range tt.forbid {

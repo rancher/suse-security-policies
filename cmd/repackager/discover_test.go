@@ -122,16 +122,20 @@ func TestDiscoverMissingMetadata(t *testing.T) {
 		name, wantOut, wantErr string
 		args                   []string
 		rules                  []rule
+		tries                  int
 	}{
-		{name: "missing file skips the release", rules: append([]rule{missing}, discoverRules()...), wantOut: "pod-privileged-policy/v1.10.0"},
+		{name: "missing file skips the release", rules: append([]rule{missing}, discoverRules()...), wantOut: "pod-privileged-policy/v1.10.0", tries: 1},
 		{name: "missing file of the asked policy", args: []string{"--policy-name", "capabilities-psp-policy"},
-			rules: append([]rule{missing}, discoverRules()...), wantErr: "HTTP 404"},
-		{name: "other error stops", rules: append([]rule{{prefix: missing.prefix, err: "gh: Server Error (HTTP 502)"}}, discoverRules()...), wantErr: "HTTP 502"},
+			rules: append([]rule{missing}, discoverRules()...), wantErr: "HTTP 404", tries: 1},
+		{name: "other error stops", rules: append([]rule{{prefix: missing.prefix, err: "gh: Server Error (HTTP 502)"}}, discoverRules()...), wantErr: "HTTP 502", tries: 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			newFake(t, "", tt.rules...)
+			f := newFake(t, "", tt.rules...)
 			stdout, err := execute(t, append([]string{"discover", "--config", "testdata/config.yaml", "--repository", "rancher/suse-security-policies"}, tt.args...)...)
+			if got := len(slices.DeleteFunc(slices.Clone(f.calls), func(c string) bool { return !strings.HasPrefix(c, missing.prefix) })); got != tt.tries {
+				t.Errorf("discover read the missing file %d times instead of %d", got, tt.tries)
+			}
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Errorf("discover returned the error %v, but the test expects an error with %q", err, tt.wantErr)

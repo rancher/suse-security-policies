@@ -101,11 +101,11 @@ func signingIdentity(repo string) ([]string, error) {
 }
 
 func verifyLegacySignature(ctx context.Context, ref string, identity []string) ([]byte, error) {
-	return cosign(ctx, append([]string{"verify", ref, "--new-bundle-format=false", "--output", "json"}, identity...)...)
+	return cosignVerify(ctx, append([]string{"verify", ref, "--new-bundle-format=false", "--output", "json"}, identity...)...)
 }
 
 func verifyAttestation(ctx context.Context, ref, predicateType string, identity []string) ([]byte, error) {
-	return cosign(ctx, append([]string{"verify-attestation", ref, "--type", predicateType}, identity...)...)
+	return cosignVerify(ctx, append([]string{"verify-attestation", ref, "--type", predicateType}, identity...)...)
 }
 
 func signBlob(ctx context.Context, blob, bundle string) error {
@@ -114,7 +114,7 @@ func signBlob(ctx context.Context, blob, bundle string) error {
 }
 
 func verifyBlob(ctx context.Context, blob, bundle string, identity []string) error {
-	_, err := cosign(ctx, append([]string{"verify-blob", blob, "--bundle", bundle}, identity...)...)
+	_, err := cosignVerify(ctx, append([]string{"verify-blob", blob, "--bundle", bundle}, identity...)...)
 	return err
 }
 
@@ -257,7 +257,7 @@ func annotate(ctx context.Context, d *repackageData) error {
 	logf("::group::%s", titleAnnotate)
 	defer logf("::endgroup::")
 	upstreamWasm, suseWasm := d.path(upstreamWasmName), d.path(suseWasmName)
-	upstream, err := pullAndInspect(ctx, d.upstreamRef, upstreamWasm, d.path(upstreamMetadataName))
+	upstream, err := pullAndInspect(ctx, d.id, d.upstreamRef, upstreamWasm, d.path(upstreamMetadataName))
 	if v, u := str(upstream, "annotations", keyVersion), str(upstream, "annotations", keyOCIURL); err == nil && (v != d.version || u != d.cfg.Upstream.Registry+"/"+d.id) {
 		err = fmt.Errorf("the upstream module has the version %q and points at %q, but the release is %s of %s/%s", v, u, d.version, d.cfg.Upstream.Registry, d.id)
 	}
@@ -300,8 +300,8 @@ func annotate(ctx context.Context, d *repackageData) error {
 	return err
 }
 
-func pullAndInspect(ctx context.Context, ref, wasm, metadataFile string) (any, error) {
-	if _, err := kwctl(ctx, "pull", "registry://"+ref, "-o", wasm); err != nil {
+func pullAndInspect(ctx context.Context, id, ref, wasm, metadataFile string) (any, error) {
+	if _, err := kwctlRead(ctx, id, "pull", "registry://"+ref, "-o", wasm); err != nil {
 		return nil, err
 	}
 	return inspectMetadata(ctx, wasm, metadataFile)
@@ -332,9 +332,8 @@ func push(ctx context.Context, d *repackageData) error {
 	repo := d.cfg.Destination.Registry + "/" + d.id
 	d.destRef = repo + ":v" + d.version
 	suseWasm, existing := d.path(suseWasmName), d.path(existingWasmName)
-	if _, err := kwctl(ctx, "pull", "registry://"+d.destRef, "-o", existing); err != nil {
-		// The policy id comes from upstream, so it must not make the match.
-		if !notFoundPattern.MatchString(strings.ReplaceAll(err.Error(), d.id, "")) {
+	if _, err := kwctlRead(ctx, d.id, "pull", "registry://"+d.destRef, "-o", existing); err != nil {
+		if !tagMissing(err, d.id) {
 			return fmt.Errorf("cannot tell whether %s already exists: %w", d.destRef, err)
 		}
 		if d.dryRun {
@@ -347,12 +346,12 @@ func push(ctx context.Context, d *repackageData) error {
 		}
 		return err
 	}
-	out, err := kwctl(ctx, "digest", "registry://"+d.destRef)
+	out, err := kwctlRead(ctx, d.id, "digest", "registry://"+d.destRef)
 	ref := repo + "@" + strings.TrimSpace(string(out[bytes.LastIndexByte(out, '@')+1:]))
 	if err == nil && !digestPattern.MatchString(strings.TrimPrefix(ref, repo+"@")) {
 		err = fmt.Errorf("kwctl digest %s printed %q, which has no sha256 digest", d.destRef, strings.TrimSpace(string(out)))
 	} else if err == nil {
-		_, err = kwctl(ctx, "pull", "registry://"+ref, "-o", existing)
+		_, err = kwctlRead(ctx, d.id, "pull", "registry://"+ref, "-o", existing)
 	}
 	got, _ := fileSHA256(existing)
 	if want, _ := fileSHA256(suseWasm); err == nil && got != want {
@@ -372,7 +371,7 @@ func upstreamSBOM(ctx context.Context, d *repackageData) error {
 	}
 	sbom, bundle := d.path(upstreamSBOMName), d.path(upstreamSBOMBundleName)
 	for _, asset := range [][2]string{{upstreamSBOMAsset, sbom}, {upstreamSBOMBundleAsset, bundle}} {
-		if _, err := githubRelease(ctx, "download", d.tag, "--repo", "github.com/"+d.cfg.Upstream.Repository,
+		if _, err := githubReleaseDownload(ctx, d.tag, "--repo", "github.com/"+d.cfg.Upstream.Repository,
 			"--pattern", asset[0], "--output", asset[1], "--clobber"); err != nil {
 			return err
 		}

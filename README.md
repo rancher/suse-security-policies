@@ -434,9 +434,29 @@ error in the log. A failed run deletes no artifact in the registry and no
 release. The draft release of a failed run and the artifact stay for the
 next run.
 
-A failed signature check can come from a bad signature or from a short
-network error. The program tries each check one time only. If a check
-fails, the job fails, and a person can start the workflow again.
+A failed read can come from a short network error, for example a GitHub
+502, a registry 5xx, a Rekor timeout or a rate limit. GitHub sends a rate
+limit as HTTP 429, or as HTTP 403 with "rate limit" in the message. Thus the
+program tries each read up to three times. It waits 2 seconds before the
+second try and 8 seconds before the third try. The log shows a warning
+before each new try. The reads are the GET calls of `gh api`, and the
+commands `gh release download`, `kwctl pull`, `kwctl digest`, `cosign
+verify`, `cosign verify-attestation` and `cosign verify-blob`. A read can run
+again without risk, because it changes nothing.
+
+The program does not try a read again when the answer cannot change. These
+answers are a GitHub 4xx error that is not a rate limit, a tag that is not
+in the registry, and a cosign result that shows no signature or attestation
+from the expected signer. cosign returns the same error for a bad signature
+and for a network error. Thus a bad signature fails three times before the
+job fails.
+
+The program never tries a write again. The writes are the `gh api` calls
+that create, upload, publish or delete, `kwctl push`, `cosign sign`,
+`cosign attest` and `cosign sign-blob`. A write that failed can still have
+changed the registry or the release, and the releases are immutable. If a
+write fails, the job fails, and a person must look at the result before
+they start the workflow again.
 
 If a check of the draft fails before the publication, the run publishes
 nothing. The draft stays for a person to look at. The run that publishes the
