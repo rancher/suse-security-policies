@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testData(t *testing.T, work string) *repackageData {
@@ -17,10 +18,10 @@ func testData(t *testing.T, work string) *repackageData {
 	return &repackageData{
 		cfg: cfg, repo: "rancher/suse-security-policies", sha: testSHA, workDir: work,
 		name: "pod-privileged-policy", version: "1.2.3", tag: testTag, id: "pod-privileged",
-		url:            "https://github.com/kubewarden/policies/releases/tag/" + testTag,
-		upstream:       map[string]any{"published_at": "2026-01-02T04:04:05+01:00"},
-		upstreamRoot:   map[string]any{"SPDXID": "SPDXRef-Package-src", "versionInfo": testCommit, "licenseDeclared": "Apache-2.0"},
-		upstreamDigest: upstreamDigest, immutableRef: suseRef,
+		url:               "https://github.com/kubewarden/policies/releases/tag/" + testTag,
+		upstreamPublished: time.Date(2026, 1, 2, 4, 4, 5, 0, time.FixedZone("", 3600)),
+		upstreamRoot:      map[string]any{"SPDXID": "SPDXRef-Package-src", "versionInfo": testCommit, "licenseDeclared": "Apache-2.0"},
+		upstreamDigest:    upstreamDigest, immutableRef: suseRef,
 		upstreamNamespace: "https://kubewarden.io/spdx/pod-privileged-1.2.3",
 		sourceCommit:      testCommit, sourceSHA256: strings.Repeat("e", 64),
 	}
@@ -57,6 +58,34 @@ func TestSUSESBOM(t *testing.T) {
 	golden(t, "sbom.golden.json", outputs[0])
 	if !bytes.Equal(outputs[0], outputs[1]) {
 		t.Error("two runs for the same artifact gave two different SBOMs")
+	}
+}
+
+func TestCheckSUSESBOM(t *testing.T) {
+	work := t.TempDir()
+	f := newFake(t, work, rule{prefix: "sbom-utility validate ", out: "valid"})
+	for name, content := range map[string]string{suseWasmName: "suse wasm", upstreamSBOMName: "{}"} {
+		if err := os.WriteFile(filepath.Join(work, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := testData(t, work)
+	d.immutableRef = ""
+	if err := checkSUSESBOM(context.Background(), d); err != nil {
+		t.Fatalf("checkSUSESBOM failed: %v", err)
+	}
+	if want := "sbom-utility validate --input-file $WORK/" + draftSUSESBOMName; len(f.calls) != 1 || f.calls[0] != want {
+		t.Errorf("checkSUSESBOM ran %q, expected only %q", f.calls, want)
+	}
+	if _, err := os.Stat(d.path(suseSBOMName)); !os.IsNotExist(err) {
+		t.Errorf("checkSUSESBOM wrote %s, which is a release asset", suseSBOMName)
+	}
+	data, err := os.ReadFile(d.path(draftSUSESBOMName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "@sha256%3A" + strings.Repeat("0", 64) + "?"; !bytes.Contains(data, []byte(want)) {
+		t.Errorf("the draft SBOM does not contain the placeholder digest %q:\n%s", want, data)
 	}
 }
 

@@ -79,10 +79,16 @@ signing and distribution problems here.
 - A second SBOM, the SUSE SBOM, describes the artifact that SUSE publishes. It
   records the sha256 and the OCI digest of that artifact. The workflow signs
   the SUSE SBOM and attests it to the pushed manifest. An attestation is a
-  signed statement that the registry stores next to the artifact. Before the
-  release, `sbom-utility` makes sure that the SUSE SBOM is valid SPDX 2.3.
+  signed statement that the registry stores next to the artifact.
+  `sbom-utility` makes sure that the SUSE SBOM is valid SPDX 2.3, one time
+  before the push and one time after the push.
 - The workflow signs nothing until every check that can run before the
   release passes.
+- The workflow pushes the module only after every check passes that only
+  reads and that does not need the pushed artifact. These checks include the
+  upstream signature, the module metadata, the upstream SBOM, the source
+  commit and a draft of the SUSE SBOM. If one of them fails, the run stops
+  and puts nothing in the registry.
 - A failed run deletes no artifact in the registry and no release. The
   release step creates a new draft release. It deletes the old drafts for the
   tag only after the publication. If a run fails, a person must look at the
@@ -147,9 +153,12 @@ and run it.
        check the module metadata names the release
        patch the provenance annotations in place
        check nothing else moved
+       verify the upstream SBOM, which the release republishes
+       check the upstream tag names the commit in the upstream SBOM
+       download the upstream source archive of that commit
+       generate and validate a draft SUSE SBOM with a placeholder digest
        push to the destination registry, unsigned, or reuse the same module
-       republish the upstream SBOM, generate and validate the SUSE one
-       attach the upstream source archive of the release commit
+       generate and validate the SUSE SBOM with the pushed digest
        render the release notes
        sign the artifact, the module file and the SUSE SBOM
        attest the SUSE SBOM, verify our own signatures
@@ -212,24 +221,33 @@ steps in one process. Each step is a log group:
    at the tag.
 2. Verify the upstream policy signature.
 3. Annotate the policy.
-4. Push the repackaged policy.
-5. Download and verify the upstream SBOM.
-6. Generate the SUSE SBOM.
-7. Download the upstream source archive and render the release notes.
-8. Sign and attest. The step also verifies every signature.
-9. Publish the release. The step creates a draft release through the GitHub
-   API and uploads the assets to it. Then it reads the draft by the id in the
-   response to the creation. It checks the tag, the commit, the names of the 7
-   assets, and the state, size and sha256 digest of each asset. It also checks
-   that the tag does not exist and that no published release has the tag. If a
-   check fails, the draft stays and the step stops. Next, it publishes that
-   draft by its id. It does not look for the draft by its tag, because another
-   draft can have the same tag. Then it reads the release again and makes the
-   same checks. It also makes sure that the tag points at the commit of the
-   run. Last, if these checks pass, it deletes the old drafts for the tag.
+4. Download and verify the upstream SBOM. The step also reads the
+   publication time of the upstream release.
+5. Download the upstream source archive. The step first makes sure that the
+   upstream tag points at the commit that the upstream SBOM records.
+6. Validate a draft of the SUSE SBOM. The draft has a placeholder digest,
+   because the module is not pushed yet.
+7. Push the repackaged policy.
+8. Generate the SUSE SBOM. The step builds it with the digest of the pushed
+   artifact and validates it again.
+9. Render the release notes.
+10. Sign and attest. The step also verifies every signature.
+11. Publish the release. The step creates a draft release through the GitHub
+    API and uploads the assets to it. Then it reads the draft by the id in the
+    response to the creation. It checks the tag, the commit, the names of the 7
+    assets, and the state, size and sha256 digest of each asset. It also checks
+    that the tag does not exist and that no published release has the tag. If a
+    check fails, the draft stays and the step stops. Next, it publishes that
+    draft by its id. It does not look for the draft by its tag, because another
+    draft can have the same tag. Then it reads the release again and makes the
+    same checks. It also makes sure that the tag points at the commit of the
+    run. Last, if these checks pass, it deletes the old drafts for the tag.
 
-The program signs nothing before step 8. If a step fails, the job fails and
-the later steps do not run. See [When a run fails](#when-a-run-fails).
+The program pushes nothing before step 7 and signs nothing before step 10.
+Steps 1 to 6 change nothing in the registry or on GitHub. The SUSE SBOM and
+the release notes record the digest of the pushed artifact, so steps 8 and 9
+come after the push. If a step fails, the job fails and the later steps do
+not run. See [When a run fails](#when-a-run-fails).
 
 The steps share their results in memory. The program saves no state file.
 It writes the files of the run to a temporary directory and removes the
@@ -255,9 +273,10 @@ The job keeps its write permissions and `id-token: write`, because GitHub
 Actions cannot set permissions from an input. Thus a dry run also runs only
 on the `main` branch.
 
-A dry run cannot check the SUSE SBOM of a module that is not in the registry
-yet. The SUSE SBOM records the digest of the pushed artifact, and a dry run
-does not push.
+A dry run makes sure that a draft of the SUSE SBOM is valid. The draft has a
+placeholder digest. A dry run cannot make the SUSE SBOM of a module that is
+not in the registry yet. The SUSE SBOM records the digest of the pushed
+artifact, and a dry run does not push.
 
 ## The repackager program
 
@@ -497,9 +516,18 @@ also attests the document to the pushed manifest, in the format of
 Kubewarden pulls policies from the registry, not from GitHub releases. Without
 the attestation, tools that use the module cannot find the SBOM.
 
-Before the workflow signs anything, `sbom-utility` makes sure that the
-document is valid SPDX 2.3. The program builds each field from the files of
-the run, so it does not compare the fields with the files again.
+Before the push, the program builds a draft of the document in
+`draft-policy-sbom.spdx.json` in the work directory. The draft has the
+placeholder digest `sha256:` followed by 64 zeros. `sbom-utility` makes sure
+that the draft is valid SPDX 2.3. The license, copyright and SPDXID fields
+come from upstream, so they can make this check fail for every run of a
+release. Thus the check runs before the push, also in a dry run. The draft
+is not a release asset.
+
+After the push, the program builds the document again with the digest of the
+pushed artifact. Before the workflow signs anything, `sbom-utility` makes sure
+that this document is valid SPDX 2.3 too. The program builds each field from
+the files of the run, so it does not compare the fields with the files again.
 
 `downloadLocation` names the release asset. GitHub builds that address from
 the repository, the release tag and the asset name. After the publication,
@@ -798,8 +826,10 @@ change both pins to that release.
   must fix the release by hand.
 - A failed run leaves its artifact in the registry, unsigned or signed, until
   the next run reuses it. Thus a tag can be visible before its release exists.
-  The run already checked the module before the push, so the artifact always
-  has the correct content.
+  The run already checked the module, the upstream SBOM, the source commit
+  and a draft of the SUSE SBOM before the push, so the artifact always has
+  the correct content. Only a failure in step 7 or later can leave an
+  artifact.
 - The next run reuses the artifact only if it gets the same module. If you
   change the kwctl version between a failed run and the next run, the module
   changes, and the run stops. Then you must delete the artifact by hand.

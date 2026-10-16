@@ -11,7 +11,6 @@ import (
 	"os"
 	"slices"
 	"strings"
-	"time"
 )
 
 // The SPDX types keep their fields sorted by JSON key. encoding/json writes
@@ -74,28 +73,62 @@ type spdxRelationship struct {
 	SPDXElementID      string `json:"spdxElementId"`
 }
 
-// The document does not name the commit of the run, so a second run gives
-// the same document for the same artifact and can keep its attestation.
+var placeholderDigest = "sha256:" + strings.Repeat("0", 64)
+
+// checkSUSESBOM runs before the push, also in a dry run. The upstream
+// license, copyright and SPDXID data can fail the validation on every run of
+// a release, and a failure after the push leaves an artifact that no run can
+// sign. The draft is not a release asset.
+func checkSUSESBOM(ctx context.Context, d *repackageData) error {
+	logf("::group::%s", titleCheckSUSESBOM)
+	defer logf("::endgroup::")
+	_, err := writeSUSESBOM(ctx, d, d.cfg.Destination.Registry+"/"+d.id+"@"+placeholderDigest, d.path(draftSUSESBOMName))
+	return err
+}
+
 func suseSBOM(ctx context.Context, d *repackageData) error {
 	logf("::group::%s", titleSUSESBOM)
 	defer logf("::endgroup::")
 	if d.immutableRef == "" {
 		return nil
 	}
-	created, err := time.Parse(time.RFC3339, str(d.upstream, "published_at"))
-	if err != nil {
-		return fmt.Errorf("the upstream release %s has no publication time: %w", d.tag, err)
+	var err error
+	d.suseNamespace, err = writeSUSESBOM(ctx, d, d.immutableRef, d.path(suseSBOMName))
+	return err
+}
+
+// writeSUSESBOM returns the namespace of the document.
+func writeSUSESBOM(ctx context.Context, d *repackageData, immutableRef, path string) (string, error) {
+	doc := suseSBOMDocument(d, immutableRef)
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	// The purl holds "&", which must stay as it is.
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(doc); err != nil {
+		return "", err
 	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		return "", err
+	}
+	if out, err := sbomUtility(ctx, "validate", "--input-file", path); err != nil {
+		return "", fmt.Errorf("the SUSE SBOM is not valid SPDX 2.3: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return doc.DocumentNamespace, nil
+}
+
+// The document does not name the commit of the run, so a second run gives
+// the same document for the same artifact and can keep its attestation.
+func suseSBOMDocument(d *repackageData, immutableRef string) spdxDocument {
 	wasmSum, _ := fileSHA256(d.path(suseWasmName))
 	upstreamSum, _ := fileSHA256(d.path(upstreamSBOMName))
 	cfg, root, pkg := d.cfg, d.upstreamRoot, "SPDXRef-Package-"+d.id
-	d.suseNamespace = cfg.SBOM.NamespaceBase + "/" + d.id + "/" + d.version + "-" + nameUUID(d.immutableRef)
-	repository, digest, _ := strings.Cut(d.immutableRef, "@")
-	doc := spdxDocument{
+	repository, digest, _ := strings.Cut(immutableRef, "@")
+	return spdxDocument{
 		SPDXVersion: "SPDX-2.3", DataLicense: "CC0-1.0", SPDXID: "SPDXRef-DOCUMENT", Name: d.id + "-" + d.version,
-		DocumentNamespace: d.suseNamespace,
+		DocumentNamespace: cfg.SBOM.NamespaceBase + "/" + d.id + "/" + d.version + "-" + nameUUID(immutableRef),
 		CreationInfo: spdxCreationInfo{
-			Created:  created.UTC().Format("2006-01-02T15:04:05Z"),
+			Created:  d.upstreamPublished.UTC().Format("2006-01-02T15:04:05Z"),
 			Creators: []string{"Organization: SUSE", "Tool: " + cfg.SBOM.ToolName},
 		},
 		ExternalDocumentRefs: []spdxExternalDocumentRef{{
@@ -124,21 +157,6 @@ func suseSBOM(ctx context.Context, d *repackageData) error {
 			{SPDXElementID: pkg, RelatedSPDXElement: "DocumentRef-upstream:" + str(root, "SPDXID"), RelationshipType: "GENERATED_FROM"},
 		},
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	// The purl holds "&", which must stay as it is.
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(doc); err != nil {
-		return err
-	}
-	if err := os.WriteFile(d.path(suseSBOMName), buf.Bytes(), 0o644); err != nil {
-		return err
-	}
-	if out, err := sbomUtility(ctx, "validate", "--input-file", d.path(suseSBOMName)); err != nil {
-		return fmt.Errorf("the SUSE SBOM is not valid SPDX 2.3: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
 }
 
 func orNoAssertion(v any, key string) string { return cmp.Or(str(v, key), "NOASSERTION") }

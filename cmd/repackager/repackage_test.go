@@ -265,7 +265,8 @@ func TestRepackage(t *testing.T) {
 		noStdout string // if not empty, stdout must not contain it
 		noCalls  bool   // no command may run
 	}{
-		{name: "dry run", dryRun: true, rules: freshRules(), forbid: append(signOrPublish, "cosign sign-blob")},
+		{name: "dry run", dryRun: true, rules: freshRules(), forbid: append(signOrPublish, "cosign sign-blob"),
+			count: map[string]int{"sbom-utility validate --input-file $WORK/" + draftSUSESBOMName: 1, "sbom-utility validate": 1}},
 		{name: "dry run without a workflow ref", dryRun: true, rules: freshRules(), env: map[string]string{"GITHUB_WORKFLOW_REF": ""},
 			forbid: append(signOrPublish, "cosign sign-blob")},
 		{name: "no workflow ref", rules: freshRules(), env: map[string]string{"GITHUB_WORKFLOW_REF": ""},
@@ -297,9 +298,20 @@ func TestRepackage(t *testing.T) {
 		{name: "tag lookup fails", rules: append([]rule{{prefix: ownRepo + "git/ref/tags/", err: "gh: Bad credentials (HTTP 401)"}}, rerunRules()...),
 			wantErr: "HTTP 401", calls: 2},
 		{name: "upstream tag lookup fails", rules: append([]rule{{prefix: "gh api --hostname github.com repos/kubewarden/policies/git/tags/", err: "gh: Server Error (HTTP 502)"}}, freshRules()...),
-			wantErr: "HTTP 502", forbid: []string{"cosign sign", "cosign attest", ownCreate, "/tarball/"}},
+			wantErr: "HTTP 502", forbid: append(signOrPublish, "/tarball/", destPull)},
 		{name: "upstream tag names another commit", rules: append([]rule{{prefix: "gh api --hostname github.com repos/kubewarden/policies/git/tags/", out: `{"object":{"type":"commit","sha":"` + strings.Repeat("e", 40) + `"}}`}}, freshRules()...),
-			wantErr: "the upstream SBOM records the commit", forbid: []string{"cosign sign", "cosign attest", ownCreate, "/tarball/"}},
+			wantErr: "the upstream SBOM records the commit", forbid: append(signOrPublish, "/tarball/", destPull)},
+		{name: "upstream SBOM signature does not verify", rules: append([]rule{{prefix: "cosign verify-blob $WORK/" + upstreamSBOMName + " ", err: "Error: invalid signature", exit: 1}}, freshRules()...),
+			wantErr: "invalid signature", forbid: append(signOrPublish, "/tarball/", destPull)},
+		{name: "upstream SBOM is missing", rules: append([]rule{{prefix: "gh release download " + testTag + " --repo github.com/kubewarden/policies --pattern " + upstreamSBOMAsset + " ", err: "no assets match the file pattern", exit: 1}}, freshRules()...),
+			wantErr: "no assets match the file pattern", forbid: append(signOrPublish, destPull)},
+		{name: "upstream checks before the push", rules: freshRules(), want: []string{"kwctl push"},
+			before: map[string]string{"gh release download ": destPull, "repos/kubewarden/policies/git/": destPull, "/tarball/": destPull, draftSUSESBOMName: destPull}},
+		{name: "SUSE SBOM not valid", rules: append([]rule{{prefix: "sbom-utility validate ", out: "the license is not valid", err: "sbom-utility: exit status 1"}}, freshRules()...),
+			wantErr: "the SUSE SBOM is not valid SPDX 2.3", forbid: append(signOrPublish, destPull), count: map[string]int{"sbom-utility validate": 1}},
+		{name: "upstream release without a publication time", rules: append([]rule{{prefix: "gh api --hostname github.com repos/kubewarden/policies/releases/tags/",
+			out: fmt.Sprintf(`{"tag_name":%q,"html_url":"https://github.com/kubewarden/policies/releases/tag/%s"}`, testTag, testTag)}}, freshRules()...),
+			wantErr: "has no publication time", forbid: append(signOrPublish, destPull, "sbom-utility")},
 		{name: "destination holds another module", rules: append([]rule{{prefix: "kwctl pull registry://ghcr.io/rancher/", write: "other wasm"}}, freshRules()[1:]...),
 			wantErr: "holds another module", forbid: signOrPublish},
 		{name: "stale draft", rules: append([]rule{
@@ -445,7 +457,8 @@ func TestRepackage(t *testing.T) {
 			wantErr: "HTTP 502", count: map[string]int{ownUpload + "42/assets?name=": 7, "-X PATCH": 1}},
 		{name: "stale SBOM attestation", rules: append([]rule{{prefix: spdxCheck, fn: attested(staleSBOM)}}, rerunRules()...), wantErr: staleErr, forbid: noWrite},
 		{name: "fresh run", rules: freshRules(), want: []string{"kwctl push", ownCreate},
-			count: map[string]int{"cosign attest --yes --type spdxjson ": 1, "cosign sign --yes --new-bundle-format=false ": 1, "cosign sign --yes --use-signing-config=true ": 1, "-X PATCH": 1}},
+			count: map[string]int{"cosign attest --yes --type spdxjson ": 1, "cosign sign --yes --new-bundle-format=false ": 1, "cosign sign --yes --use-signing-config=true ": 1, "-X PATCH": 1,
+				"sbom-utility validate --input-file $WORK/" + draftSUSESBOMName: 1, "sbom-utility validate --input-file $WORK/" + suseSBOMName: 1}},
 		{name: "SBOM attested but not signed", rules: append([]rule{
 			{prefix: ownVerify, err: noSignatures, exit: 10, once: true},
 			{prefix: signCheck, err: noSignatureAtt, exit: 1, once: true},

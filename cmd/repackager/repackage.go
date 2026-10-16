@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/yaml"
 )
@@ -31,6 +32,7 @@ const (
 	upstreamSBOMName       = "upstream-policy-sbom.spdx.json"
 	upstreamSBOMBundleName = "upstream-policy-sbom.spdx.jsonl.bundle.sigstore"
 	suseSBOMName           = "policy-sbom.spdx.json"
+	draftSUSESBOMName      = "draft-policy-sbom.spdx.json"
 	suseSBOMBundleName     = "policy-sbom.spdx.jsonl.bundle.sigstore"
 	sourceArchiveName      = "upstream-source.tar.gz"
 	releaseNotesName       = "release-notes.md"
@@ -67,6 +69,7 @@ type repackageData struct {
 	dryRun                                                                bool
 	name, version, tag, id, url                                           string
 	upstream, upstreamRoot                                                any
+	upstreamPublished                                                     time.Time
 	upstreamDigest, upstreamRef, immutableRef                             string
 	destRef, sourceCommit, sourceSHA256, upstreamNamespace, suseNamespace string
 	ownIdentity                                                           []string
@@ -148,10 +151,12 @@ const (
 	titleFindUpstream   = "Find the upstream release"
 	titleVerifyUpstream = "Verify the upstream policy signature"
 	titleAnnotate       = "Annotate the policy"
-	titlePush           = "Push the repackaged policy"
 	titleUpstreamSBOM   = "Download and verify the upstream SBOM"
+	titleDownloadSource = "Download the upstream source archive"
+	titleCheckSUSESBOM  = "Validate a draft of the SUSE SBOM"
+	titlePush           = "Push the repackaged policy"
 	titleSUSESBOM       = "Generate the SUSE SBOM"
-	titleDownloadSource = "Download the upstream source archive and render the release notes"
+	titleReleaseNotes   = "Render the release notes"
 	titleSign           = "Sign and attest"
 	titlePublish        = "Publish the release"
 )
@@ -166,17 +171,26 @@ func repackageSteps(ctx context.Context, d *repackageData) error {
 	if err := annotate(ctx, d); err != nil {
 		return fmt.Errorf("%s: %w", titleAnnotate, err)
 	}
-	if err := push(ctx, d); err != nil {
-		return fmt.Errorf("%s: %w", titlePush, err)
-	}
 	if err := upstreamSBOM(ctx, d); err != nil {
 		return fmt.Errorf("%s: %w", titleUpstreamSBOM, err)
+	}
+	if err := downloadSource(ctx, d); err != nil {
+		return fmt.Errorf("%s: %w", titleDownloadSource, err)
+	}
+	if err := checkSUSESBOM(ctx, d); err != nil {
+		return fmt.Errorf("%s: %w", titleCheckSUSESBOM, err)
+	}
+	// The checks above can fail for every run of an upstream release. The
+	// push comes after them, so that it cannot leave an artifact in the
+	// registry that no run can sign.
+	if err := push(ctx, d); err != nil {
+		return fmt.Errorf("%s: %w", titlePush, err)
 	}
 	if err := suseSBOM(ctx, d); err != nil {
 		return fmt.Errorf("%s: %w", titleSUSESBOM, err)
 	}
-	if err := downloadSource(ctx, d); err != nil {
-		return fmt.Errorf("%s: %w", titleDownloadSource, err)
+	if err := releaseNotes(d); err != nil {
+		return fmt.Errorf("%s: %w", titleReleaseNotes, err)
 	}
 	if d.dryRun {
 		logf("::notice::Dry run: the program does not push, sign or publish anything")
@@ -324,7 +338,7 @@ func push(ctx context.Context, d *repackageData) error {
 			return fmt.Errorf("cannot tell whether %s already exists: %w", d.destRef, err)
 		}
 		if d.dryRun {
-			logf("::notice::Dry run: the program does not push %s, so it does not generate or validate the SUSE SBOM", d.destRef)
+			logf("::notice::Dry run: the program does not push %s, so it does not generate the SUSE SBOM for the pushed digest", d.destRef)
 			return nil
 		}
 		out, err := decode(kwctl(ctx, "push", "-o", "json", suseWasm, d.destRef))
@@ -352,6 +366,10 @@ func push(ctx context.Context, d *repackageData) error {
 func upstreamSBOM(ctx context.Context, d *repackageData) error {
 	logf("::group::%s", titleUpstreamSBOM)
 	defer logf("::endgroup::")
+	var err error
+	if d.upstreamPublished, err = time.Parse(time.RFC3339, str(d.upstream, "published_at")); err != nil {
+		return fmt.Errorf("the upstream release %s has no publication time: %w", d.tag, err)
+	}
 	sbom, bundle := d.path(upstreamSBOMName), d.path(upstreamSBOMBundleName)
 	for _, asset := range [][2]string{{upstreamSBOMAsset, sbom}, {upstreamSBOMBundleAsset, bundle}} {
 		if _, err := githubRelease(ctx, "download", d.tag, "--repo", "github.com/"+d.cfg.Upstream.Repository,
@@ -395,8 +413,14 @@ func downloadSource(ctx context.Context, d *repackageData) error {
 		err = os.WriteFile(archive, data, 0o644)
 	}
 	d.sourceSHA256, _ = fileSHA256(archive)
+	return err
+}
+
+func releaseNotes(d *repackageData) error {
+	logf("::group::%s", titleReleaseNotes)
+	defer logf("::endgroup::")
 	notes := []byte(renderReleaseNotes(d, cmp.Or(d.immutableRef, "<not pushed: dry run>"), str(d.upstream, "body")))
-	return errors.Join(err, os.WriteFile(d.path(releaseNotesName), notes, 0o644))
+	return os.WriteFile(d.path(releaseNotesName), notes, 0o644)
 }
 
 // sign keeps a signature or an attestation of an earlier run that
