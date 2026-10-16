@@ -200,6 +200,7 @@ annotations:
   com.suse.policy.upstream.release-url: %s
   com.suse.policy.upstream.repository: kubewarden/policies
   com.suse.policy.upstream.tag: %s
+  org.opencontainers.image.source: https://github.com/rancher/suse-security-policies
 `, upstreamDigest, releaseURL, testTag)
 	return []rule{
 		{prefix: ownRepo + "releases/tags/", err: "gh: Not Found (HTTP 404)"},
@@ -337,6 +338,17 @@ func TestRepackage(t *testing.T) {
 	published := func(edit func(rel map[string]any, assets []map[string]any)) []rule {
 		return append([]rule{draftRead(nil), {prefix: ownRepo + "releases/42", fn: release(42, false, edit)}}, rerunRules()...)
 	}
+	// repackagedSource gives the rules of a rerun where the line of
+	// org.opencontainers.image.source in the repackaged metadata is line.
+	repackagedSource := func(line string) []rule {
+		rules := rerunRules()
+		for i, r := range rules {
+			if r.prefix == "kwctl inspect -o yaml $WORK/"+suseWasmName {
+				rules[i].out = strings.Replace(r.out, "  org.opencontainers.image.source: https://github.com/rancher/suse-security-policies\n", line, 1)
+			}
+		}
+		return rules
+	}
 	tests := []struct {
 		name    string
 		dryRun  bool
@@ -371,6 +383,10 @@ func TestRepackage(t *testing.T) {
 			want: []string{ownCreate, "-X PATCH", "kwctl digest registry://ghcr.io/rancher/suse-security-policies/pod-privileged:v1.2.3",
 				"kwctl pull registry://" + suseRef + " -o $WORK/existing-policy.wasm",
 				"cosign verify " + suseRef + " --new-bundle-format=false --output json --certificate-identity https://github.com/rancher/suse-security-policies/.github/workflows/sync-upstream-releases.yaml@refs/heads/main --certificate-oidc-issuer https://token.actions.githubusercontent.com"}},
+		{name: "repackaged module names another source", rules: repackagedSource("  org.opencontainers.image.source: https://github.com/kubewarden/policies\n"),
+			wantErr: `the repackaged policy has org.opencontainers.image.source="https://github.com/kubewarden/policies"`, forbid: append(signOrPublish, destPull)},
+		{name: "repackaged module has no source", rules: repackagedSource(""),
+			wantErr: `the repackaged policy has org.opencontainers.image.source=""`, forbid: append(signOrPublish, destPull)},
 		{name: "destination pull denied", rules: append([]rule{{prefix: destPull, err: "Error: denied: permission denied"}}, rerunRules()...),
 			wantErr: "cannot tell whether", forbid: signOrPublish, count: map[string]int{destPull: 3}},
 		{name: "digest output without a digest", rules: append([]rule{

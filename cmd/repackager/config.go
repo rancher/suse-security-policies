@@ -45,6 +45,7 @@ func loadConfig(path string) (*config, error) {
 		{"upstream.certificate_identity_template", c.Upstream.CertificateIdentityTemplate},
 		{"upstream.certificate_oidc_issuer", c.Upstream.CertificateOIDCIssuer},
 		{"destination.registry", c.Destination.Registry},
+		{"metadata.url", c.Metadata.URL},
 		{"sbom.namespace_base", c.SBOM.NamespaceBase},
 		{"sbom.supplier", c.SBOM.Supplier},
 		{"sbom.originator", c.SBOM.Originator},

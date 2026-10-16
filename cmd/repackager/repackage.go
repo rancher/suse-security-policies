@@ -132,6 +132,9 @@ func repackage(ctx context.Context, d *repackageData) error {
 	if !shaPattern.MatchString(d.sha) {
 		return fmt.Errorf("repackage: --sha %q is not a full commit SHA of 40 lowercase hex characters", d.sha)
 	}
+	if d.cfg.Metadata.URL != "https://github.com/"+d.repo {
+		return fmt.Errorf("repackage: metadata.url is %q, but this run publishes from https://github.com/%s. GHCR links each new package to the repository in this URL", d.cfg.Metadata.URL, d.repo)
+	}
 	var err error
 	if !d.dryRun {
 		if d.ownIdentity, err = signingIdentity(d.repo); err != nil {
@@ -293,6 +296,10 @@ func annotate(ctx context.Context, d *repackageData) error {
 		"com.suse.policy.upstream.digest":      d.upstreamDigest,
 		"com.suse.policy.upstream.release-url": d.url,
 		"com.suse.policy.upstream.author":      str(upstream, "annotations", keyAuthor),
+		// GHCR links a new package to the repository that this annotation
+		// names. Without it, kwctl push copies io.kubewarden.policy.source,
+		// the upstream URL, into the manifest annotation.
+		"org.opencontainers.image.source": d.cfg.Metadata.URL,
 	}
 	var annotations []string
 	for _, k := range slices.Sorted(maps.Keys(want)) {
@@ -343,9 +350,9 @@ func inspectMetadata(ctx context.Context, wasm, metadataFile string) (md any, er
 	return md, err
 }
 
-// push never moves a tag, but reuses a tag with the same module bytes,
-// because two pushes of one module can give two manifests. The second pull
-// is by digest, so the tag cannot move before the signature.
+// push never moves a tag. It reuses an existing tag only when the tag holds
+// the same module bytes. The second pull is by digest, so the tag cannot move
+// before the signature.
 func push(ctx context.Context, d *repackageData) error {
 	logf("::group::%s", titlePush)
 	defer logf("::endgroup::")

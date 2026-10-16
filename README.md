@@ -44,6 +44,13 @@ signing and distribution problems here.
   A change to this annotation stops the build.
 - The `io.kubewarden.policy.author` annotation names SUSE, the publisher. The
   `com.suse.policy.upstream.author` annotation keeps the upstream author.
+- The `org.opencontainers.image.source` annotation names this repository,
+  from `metadata.url` in `config.yaml`. GHCR links a new package to the
+  repository that this annotation names, and the package gets the
+  permissions of that repository. Without it, `kwctl push` copies the
+  upstream `io.kubewarden.policy.source` value into the manifest of the
+  artifact. The `repackage` command stops at the start if `metadata.url` is
+  not the URL of the repository in `--repository`.
 - The workflow signs the repackaged module two times with the identity of this
   repository. One signature is on the OCI artifact in the registry. The other
   signature is a bundle in the format of `cosign sign-blob`. It is on the
@@ -548,7 +555,9 @@ To try a failed release again:
    deletes it.
 3. Look at the artifact in the destination registry, if there is one. Make
    sure that it is correct, or delete it. For example, delete it if the
-   run stopped because the tag holds another module.
+   run stopped because the tag holds another module. A module that an
+   earlier version of the program pushed has other metadata. Delete it by
+   hand before the next run.
 4. Fix the cause of the failure.
 5. Start the workflow again by hand. The next run reuses the pushed
    artifact, the signatures and the SBOM attestation.
@@ -935,6 +944,12 @@ change both pins to that release.
   run stops before the push. A repository with immutable releases cannot use
   that tag again. Thus the workflow does not publish that version. A newer
   upstream version of the policy gets its release as usual.
+- The tests cannot reach GHCR. Before the first run in the `rancher`
+  organization, make sure by hand that a package that `GITHUB_TOKEN` creates
+  links to this repository. Also make sure that `notFoundPattern` in
+  `cmd/repackager/repackage.go` matches the exact "not found" error that GHCR
+  returns for a package that never existed. If one of these is not true, a run
+  can stop after the push and before the signature.
 - The pipeline does not prove that the bytes outside the metadata section are
   the same as upstream. `kwctl annotate` writes the whole module out again,
   and the upstream module went through a different kwctl version. Two changes

@@ -18,6 +18,12 @@ func TestCLI(t *testing.T) {
 			wantErr: "these flags are required and must not be empty: --repository, --sha, --policy-name, --policy-version"},
 		{name: "repackage with a short sha", args: []string{"repackage", "--config", "testdata/config.yaml", "--repository", "a/b", "--sha", "abc123",
 			"--policy-name", "p", "--policy-version", "1.0.0"}, wantErr: "is not a full commit SHA"},
+		{name: "repackage from another repository", args: []string{"repackage", "--config", "testdata/config.yaml", "--repository", "other/suse-security-policies", "--sha", testSHA,
+			"--policy-name", "p", "--policy-version", "1.0.0"},
+			wantErr: `metadata.url is "https://github.com/rancher/suse-security-policies", but this run publishes from https://github.com/other/suse-security-policies.`},
+		{name: "dry run from another repository", args: []string{"repackage", "--config", "testdata/config.yaml", "--repository", "other/suse-security-policies", "--sha", testSHA,
+			"--policy-name", "p", "--policy-version", "1.0.0", "--dry-run"},
+			wantErr: `but this run publishes from https://github.com/other/suse-security-policies.`},
 		{name: "discover without flags", args: []string{"discover", "--config", "testdata/config.yaml"}, wantErr: "must not be empty: --repository"},
 	}
 	for _, tt := range tests {
