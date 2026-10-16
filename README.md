@@ -343,8 +343,9 @@ before the run. A missing tool stops the run at the first step that needs
 it. The targets `make discover` and `make repackage` put `bin/` first on the
 `PATH`. Thus the tools that `make runtime-tools` installs into `bin/` come
 before other copies. In the CI, the installer actions install kwctl and
-cosign. `make sbom-utility` installs sbom-utility. gh comes with the runner
-image. `kwctl` and `cosign` use the Docker credentials of the computer to
+cosign. `make sbom-utility` installs sbom-utility, and `make gh` installs gh.
+The runner image also has a gh, but its version can change without review.
+`kwctl` and `cosign` use the Docker credentials of the computer to
 read and write the registries. They read `DOCKER_CONFIG`.
 
 The program runs `cosign` to sign and to verify. To sign, `cosign` gets an
@@ -728,6 +729,7 @@ make vulncheck     # runs govulncheck, which needs network access
 make tools         # installs every tool into bin/
 make runtime-tools # installs only kwctl, sbom-utility, cosign and gh into bin/
 make sbom-utility  # installs only sbom-utility into bin/
+make gh            # installs only gh into bin/
 ```
 
 A target that needs a tool installs it into `bin/` first. `make` downloads

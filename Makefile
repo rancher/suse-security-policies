@@ -134,10 +134,27 @@ tools: $(TOOLS)
 .PHONY: runtime-tools
 runtime-tools: $(RUNTIME_TOOLS) $(RUNTIME_TOOL_LINKS)
 
-# The CI installs kwctl and cosign with their installer actions. gh comes with
-# the runner image. No installer action exists for sbom-utility.
+# The CI installs kwctl and cosign with their installer actions. No installer
+# action exists for sbom-utility.
 .PHONY: sbom-utility
 sbom-utility: $(SBOM_UTILITY) $(BIN_DIR)/sbom-utility
+
+# The runner image has a gh, but its version changes without review, and the
+# repackager parses the output and the errors of gh.
+.PHONY: gh
+gh: $(GH) $(BIN_DIR)/gh
+
+# The CI runs this check on the gh that it finds on the PATH. A gh that is
+# missing or that prints no version gives an empty value, which fails.
+.PHONY: check-gh-version
+check-gh-version:
+	@out="$$(gh --version)"; \
+	printf '%s\n' "$$out"; \
+	version="$$(printf '%s\n' "$$out" | awk 'NR == 1 { print $$3 }')"; \
+	if [ "$$version" != "$(GH_VERSION:v%=%)" ]; then \
+		echo "::error::gh is '$$version', but the Makefile pins $(GH_VERSION)"; \
+		exit 1; \
+	fi
 
 # The repackager reads only GITHUB_OUTPUT and GITHUB_STEP_SUMMARY from the
 # environment. gh reads GH_TOKEN (or GITHUB_TOKEN) itself, and cosign reads
@@ -145,7 +162,8 @@ sbom-utility: $(SBOM_UTILITY) $(BIN_DIR)/sbom-utility
 # The repackager runs kwctl, sbom-utility, cosign and gh from PATH. The
 # recipes put $(BIN_DIR) first in PATH, so the tools of "make runtime-tools"
 # come before other copies. If bin/ has no copy of a tool, the repackager runs
-# the copy that it finds next on the PATH. The CI works this way.
+# the copy that it finds next on the PATH. The CI works this way for kwctl and
+# cosign.
 # The other values come from these environment variables, and the recipes
 # pass them as flags: REPOSITORY, SHA, POLICY_NAME, POLICY_VERSION, DRY_RUN
 # and WORK_DIR. The recipes expand them in the shell, inside quotes, so make
