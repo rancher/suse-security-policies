@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -489,24 +491,28 @@ func publish(ctx context.Context, d *repackageData) error {
 		}
 		_, err = githubAPI(ctx, "-X", "DELETE", fmt.Sprintf("repos/%s/releases/%.0f", d.repo, get(r, "id")))
 	}
-	if err == nil {
-		_, err = githubRelease(ctx, append([]string{
-			"create", d.tag, "--repo", "github.com/" + d.repo, "--draft",
-			"--target", d.sha, "--title", d.tag, "--notes-file", d.path(releaseNotesName),
-		}, assets...)...)
-	}
-	if err == nil {
-		releases, err = releasesOf(ctx, d.repo)
-	}
 	var draft, published any
-	if i := slices.IndexFunc(releases, func(r any) bool { return str(r, "tag_name") == d.tag && get(r, "draft") == true }); i >= 0 {
-		draft = releases[i]
-	} else if err == nil {
-		err = fmt.Errorf("gh created no draft release for %s", d.tag)
-	}
 	if err == nil {
-		published, err = decode(githubAPI(ctx, "-X", "PATCH", fmt.Sprintf("repos/%s/releases/%.0f", d.repo, get(draft, "id")), "-F", "draft=false", "-f", "make_latest=false"))
+		draft, err = decode(githubAPI(ctx, "-X", "POST", "repos/"+d.repo+"/releases", "-f", "tag_name="+d.tag, "-f", "target_commitish="+d.sha,
+			"-f", "name="+d.tag, "-F", "draft=true", "-f", "make_latest=false", "-F", "body=@"+d.path(releaseNotesName)))
 	}
+	if err != nil {
+		return err
+	}
+	// The run does not look up the draft by its tag, because another draft can have the same tag.
+	id, isNumber := get(draft, "id").(float64)
+	uploadURL, _, _ := strings.Cut(str(draft, "upload_url"), "{")
+	wantURL := fmt.Sprintf("https://uploads.github.com/repos/%s/releases/%d/assets", d.repo, int64(id))
+	if !isNumber || id < 1 || id != math.Trunc(id) || id > 1<<53 || get(draft, "draft") != true || str(draft, "tag_name") != d.tag || uploadURL != wantURL {
+		return fmt.Errorf("the response to the creation of the draft release %s is not as expected, so the run does not publish it: id %v, draft %v, tag_name %q, upload_url %q",
+			d.tag, get(draft, "id"), get(draft, "draft"), str(draft, "tag_name"), str(draft, "upload_url"))
+	}
+	for _, a := range assets {
+		if _, err := githubAPI(ctx, "-X", "POST", wantURL+"?name="+url.QueryEscape(filepath.Base(a)), "-H", "Content-Type: application/octet-stream", "--input", a); err != nil {
+			return fmt.Errorf("cannot upload %s to the draft release %s: %w", filepath.Base(a), d.tag, err)
+		}
+	}
+	published, err = decode(githubAPI(ctx, "-X", "PATCH", fmt.Sprintf("repos/%s/releases/%d", d.repo, int64(id)), "-F", "draft=false", "-f", "make_latest=false"))
 	if err != nil {
 		return err
 	}

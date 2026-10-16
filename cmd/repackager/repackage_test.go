@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -24,7 +25,16 @@ const (
 	ownList   = "gh api --hostname github.com --paginate --slurp repos/rancher/suse-security-policies/releases"
 	destPull  = "kwctl pull registry://ghcr.io/rancher/suse-security-policies/pod-privileged:v1.2.3 "
 	ownVerify = "cosign verify ghcr.io/rancher/"
+	ownCreate = "gh api --hostname github.com -X POST repos/rancher/suse-security-policies/releases "
+	ownUpload = "gh api --hostname github.com -X POST https://uploads.github.com/repos/rancher/suse-security-policies/releases/"
+	ownAssets = "https://uploads.github.com/repos/rancher/suse-security-policies/releases/42/assets"
 )
+
+// created gives the response of GitHub to the creation of a draft release.
+func created(id any, draft any, tag, uploadURL string) string {
+	out, _ := json.Marshal(map[string]any{"id": id, "draft": draft, "tag_name": tag, "upload_url": uploadURL})
+	return string(out)
+}
 
 // attested gives the output of cosign verify-attestation for an SPDX
 // attestation of the SBOM that the run wrote. If edit is not nil, it
@@ -104,8 +114,8 @@ annotations:
 		{prefix: "cosign sign", out: ""},
 		{prefix: "cosign attest", out: ""},
 		{prefix: ownList, out: "[[]]", once: true},
-		{prefix: "gh release create ", out: ""},
-		{prefix: ownList, out: `[[{"tag_name":"` + testTag + `","draft":true,"id":42}]]`},
+		{prefix: ownCreate, out: created(42, true, testTag, ownAssets+"{?name,label}")},
+		{prefix: ownUpload, out: "{}"},
 		{prefix: "gh api --hostname github.com -X PATCH ", out: `{"assets":[{"browser_download_url":"https://github.com/rancher/suse-security-policies/releases/download/` + testTag + `/suse-policy.wasm"}]}`},
 	}
 }
@@ -134,17 +144,24 @@ func renamed(rules []rule) []rule {
 }
 
 func TestRepackage(t *testing.T) {
-	signOrPublish := []string{"kwctl push", "cosign sign --", "cosign attest", "gh release create", "-X PATCH", "-X DELETE"}
+	signOrPublish := []string{"kwctl push", "cosign sign --", "cosign attest", ownCreate, ownUpload, "-X PATCH", "-X DELETE"}
+	noUpload := []string{ownUpload, "-X PATCH"}
+	var uploads []string
+	for _, name := range []string{suseWasmName, suseWasmBundleName, sourceArchiveName, suseSBOMName, suseSBOMBundleName, upstreamSBOMName, upstreamSBOMBundleName} {
+		uploads = append(uploads, ownUpload+"42/assets?name="+name+" -H Content-Type: application/octet-stream --input $WORK/"+name+"\n")
+	}
 	tests := []struct {
 		name    string
 		dryRun  bool
 		rules   []rule
 		env     map[string]string // set after newFake
 		wantErr string
-		forbid  []string // no command line may contain one of these
-		want    []string // each of these command lines must run
-		calls   int      // if not 0, the exact number of calls
-		noCalls bool     // no command may run
+		count   map[string]int    // the number of command lines that contain the key
+		forbid  []string          // no command line may contain one of these
+		want    []string          // each of these command lines must run
+		before  map[string]string // a command line that contains the key must not run after the first one that contains the value
+		calls   int               // if not 0, the exact number of calls
+		noCalls bool              // no command may run
 	}{
 		{name: "dry run", dryRun: true, rules: freshRules(), forbid: append(signOrPublish, "cosign sign-blob")},
 		{name: "dry run without a workflow ref", dryRun: true, rules: freshRules(), env: map[string]string{"GITHUB_WORKFLOW_REF": ""},
@@ -158,7 +175,7 @@ func TestRepackage(t *testing.T) {
 			env:     map[string]string{"GITHUB_WORKFLOW_REF": "rancher/suse-security-policies/.github/workflows/sync-upstream-releases.yaml@refs/heads/feature"},
 			wantErr: "is not a workflow on the main branch of rancher/suse-security-policies", noCalls: true},
 		{name: "rerun", rules: rerunRules(), forbid: []string{"kwctl push", "cosign sign --", "cosign attest"},
-			want: []string{"gh release create", "-X PATCH", "kwctl digest registry://ghcr.io/rancher/suse-security-policies/pod-privileged:v1.2.3",
+			want: []string{ownCreate, "-X PATCH", "kwctl digest registry://ghcr.io/rancher/suse-security-policies/pod-privileged:v1.2.3",
 				"kwctl pull registry://" + suseRef + " -o $WORK/existing-policy.wasm",
 				"cosign verify " + suseRef + " --new-bundle-format=false --output json --certificate-identity https://github.com/rancher/suse-security-policies/.github/workflows/sync-upstream-releases.yaml@refs/heads/main --certificate-oidc-issuer https://token.actions.githubusercontent.com"}},
 		{name: "destination pull denied", rules: append([]rule{{prefix: destPull, err: "Error: denied: permission denied"}}, rerunRules()...),
@@ -178,25 +195,63 @@ func TestRepackage(t *testing.T) {
 		{name: "tag lookup fails", rules: append([]rule{{prefix: ownRepo + "git/ref/tags/", err: "gh: Bad credentials (HTTP 401)"}}, rerunRules()...),
 			wantErr: "HTTP 401", calls: 2},
 		{name: "upstream tag lookup fails", rules: append([]rule{{prefix: "gh api --hostname github.com repos/kubewarden/policies/git/tags/", err: "gh: Server Error (HTTP 502)"}}, freshRules()...),
-			wantErr: "HTTP 502", forbid: []string{"cosign sign", "cosign attest", "gh release create", "/tarball/"}},
+			wantErr: "HTTP 502", forbid: []string{"cosign sign", "cosign attest", ownCreate, "/tarball/"}},
 		{name: "upstream tag names another commit", rules: append([]rule{{prefix: "gh api --hostname github.com repos/kubewarden/policies/git/tags/", out: `{"object":{"type":"commit","sha":"` + strings.Repeat("e", 40) + `"}}`}}, freshRules()...),
-			wantErr: "the upstream SBOM records the commit", forbid: []string{"cosign sign", "cosign attest", "gh release create", "/tarball/"}},
+			wantErr: "the upstream SBOM records the commit", forbid: []string{"cosign sign", "cosign attest", ownCreate, "/tarball/"}},
 		{name: "destination holds another module", rules: append([]rule{{prefix: "kwctl pull registry://ghcr.io/rancher/", write: "other wasm"}}, freshRules()[1:]...),
 			wantErr: "holds another module", forbid: signOrPublish},
 		{name: "stale draft", rules: append([]rule{
 			{prefix: ownList, out: `[[{"tag_name":"` + testTag + `","draft":true,"id":7},{"tag_name":"other/v1.0.0","draft":true,"id":9}]]`, once: true},
-			{prefix: ownList, out: `[[{"tag_name":"` + testTag + `","draft":true,"id":42}]]`, once: true},
 			{prefix: "gh api --hostname github.com -X DELETE ", out: ""},
 		}, rerunRules()...), want: []string{"gh api --hostname github.com -X DELETE repos/rancher/suse-security-policies/releases/7"},
-			forbid: []string{"releases/9"}},
+			forbid: []string{"releases/9", "-X PATCH repos/rancher/suse-security-policies/releases/7"}},
+		{name: "publish the created draft", rules: rerunRules(),
+			want:   append([]string{"gh api --hostname github.com -X POST repos/rancher/suse-security-policies/releases -f tag_name=" + testTag + " -f target_commitish=" + testSHA + " -f name=" + testTag + " -F draft=true -f make_latest=false -F body=@$WORK/" + releaseNotesName + "\n"}, uploads...),
+			count:  map[string]int{ownUpload + "42/assets?name=": 7, "-X PATCH repos/rancher/suse-security-policies/releases/42 -F draft=false -f make_latest=false": 1, "-X PATCH": 1},
+			forbid: []string{"gh release create"}, before: map[string]string{ownUpload: "-X PATCH"}},
+		// Another draft with the tag exists, but only the draft that the run created is published.
+		{name: "publish by the id in the creation response", rules: append([]rule{
+			{prefix: ownList, out: `[[{"tag_name":"` + testTag + `","draft":true,"id":42}]]`, once: true},
+			{prefix: "gh api --hostname github.com -X DELETE ", out: ""},
+			{prefix: ownCreate, out: created(43, true, testTag, strings.Replace(ownAssets, "/42/", "/43/", 1)+"{?name,label}")},
+		}, rerunRules()...), count: map[string]int{ownUpload + "43/assets?name=": 7, ownUpload + "42/": 0, "-X PATCH repos/rancher/suse-security-policies/releases/43 ": 1, "-X PATCH": 1}},
+		{name: "created release is not a draft", rules: append([]rule{{prefix: ownCreate, out: created(42, false, testTag, ownAssets)}}, rerunRules()...),
+			wantErr: "not as expected", forbid: noUpload},
+		{name: "created release has another tag", rules: append([]rule{{prefix: ownCreate, out: created(42, true, "other/v1.2.3", ownAssets)}}, rerunRules()...),
+			wantErr: "not as expected", forbid: noUpload},
+		{name: "created release has no id", rules: append([]rule{{prefix: ownCreate, out: created(nil, true, testTag, ownAssets)}}, rerunRules()...),
+			wantErr: "not as expected", forbid: noUpload},
+		{name: "created release has a fractional id", rules: append([]rule{{prefix: ownCreate, out: created(42.5, true, testTag, ownAssets)}}, rerunRules()...),
+			wantErr: "not as expected", forbid: noUpload},
+		{name: "created release has a string id", rules: append([]rule{{prefix: ownCreate, out: created("42", true, testTag, ownAssets)}}, rerunRules()...),
+			wantErr: "not as expected", forbid: noUpload},
+		{name: "created release has a zero id", rules: append([]rule{{prefix: ownCreate, out: created(0, true, testTag, "https://uploads.github.com/repos/rancher/suse-security-policies/releases/0/assets")}}, rerunRules()...),
+			wantErr: "not as expected", forbid: noUpload},
+		{name: "created release has a negative id", rules: append([]rule{{prefix: ownCreate, out: created(-42, true, testTag, "https://uploads.github.com/repos/rancher/suse-security-policies/releases/-42/assets")}}, rerunRules()...),
+			wantErr: "not as expected", forbid: noUpload},
+		// JSON numbers are float64, which cannot hold every integer above 2^53.
+		{name: "created release has an id above 2^53", rules: append([]rule{{prefix: ownCreate, out: created(float64(1<<53)+2, true, testTag, "https://uploads.github.com/repos/rancher/suse-security-policies/releases/9007199254740994/assets")}}, rerunRules()...),
+			wantErr: "not as expected", forbid: noUpload},
+		{name: "upload URL of another repository", rules: append([]rule{{prefix: ownCreate, out: created(42, true, testTag, "https://uploads.github.com/repos/other/suse-security-policies/releases/42/assets{?name,label}")}}, rerunRules()...),
+			wantErr: "not as expected", forbid: noUpload},
+		{name: "upload URL of another release", rules: append([]rule{{prefix: ownCreate, out: created(42, true, testTag, strings.Replace(ownAssets, "/42/", "/43/", 1))}}, rerunRules()...),
+			wantErr: "not as expected", forbid: noUpload},
+		{name: "upload URL of another host", rules: append([]rule{{prefix: ownCreate, out: created(42, true, testTag, strings.Replace(ownAssets, "uploads.github.com", "uploads.example.com", 1))}}, rerunRules()...),
+			wantErr: "not as expected", forbid: noUpload},
+		{name: "creation fails", rules: append([]rule{{prefix: ownCreate, err: "gh: Validation Failed (HTTP 422)"}}, rerunRules()...),
+			wantErr: "HTTP 422", forbid: noUpload},
+		{name: "upload fails", rules: append([]rule{{prefix: ownUpload + "42/assets?name=" + sourceArchiveName + " ", err: "gh: Server Error (HTTP 502)"}}, rerunRules()...),
+			wantErr: "cannot upload " + sourceArchiveName, forbid: []string{"-X PATCH", "?name=" + suseSBOMName + " "}},
+		{name: "publication fails", rules: append([]rule{{prefix: "gh api --hostname github.com -X PATCH ", err: "gh: Server Error (HTTP 502)"}}, rerunRules()...),
+			wantErr: "HTTP 502", count: map[string]int{ownUpload + "42/assets?name=": 7, "-X PATCH": 1}},
 		// An earlier run attested an SBOM with another tool name.
 		{name: "stale SBOM attestation", rules: append([]rule{{prefix: spdxCheck, fn: attested(func(sbom map[string]any) {
 			sbom["creationInfo"].(map[string]any)["creators"] = []any{"Organization: SUSE", "Tool: suse-security-policies-" + testSHA}
 		})}}, rerunRules()...), wantErr: "differs from the release SBOM",
-			forbid: []string{"cosign sign", "cosign attest", "gh release create", "-X PATCH", "-X DELETE"}},
+			forbid: []string{"cosign sign", "cosign attest", ownCreate, ownUpload, "-X PATCH", "-X DELETE"}},
 		{name: "published release in the list", rules: append([]rule{
 			{prefix: ownList, out: `[[{"tag_name":"` + testTag + `","draft":false,"id":8}]]`, once: true},
-		}, rerunRules()...), wantErr: "is already published", forbid: []string{"-X DELETE", "gh release create"}},
+		}, rerunRules()...), wantErr: "is already published", forbid: []string{"-X DELETE", ownCreate, ownUpload}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -230,8 +285,31 @@ func TestRepackage(t *testing.T) {
 				}
 			}
 			for _, w := range tt.want {
-				if !strings.Contains(strings.Join(f.calls, "\n"), w) {
+				if !strings.Contains(strings.Join(f.calls, "\n")+"\n", w) {
 					t.Errorf("no command contains %q", w)
+				}
+			}
+			for later, first := range tt.before {
+				i := slices.IndexFunc(f.calls, func(call string) bool { return strings.Contains(call, first) })
+				if i < 0 {
+					t.Errorf("no command contains %q", first)
+					continue
+				}
+				for _, call := range f.calls[i+1:] {
+					if strings.Contains(call, later) {
+						t.Errorf("the command %q runs after the first command that contains %q", call, first)
+					}
+				}
+			}
+			for s, want := range tt.count {
+				got := 0
+				for _, call := range f.calls {
+					if strings.Contains(call, s) {
+						got++
+					}
+				}
+				if got != want {
+					t.Errorf("%d commands contain %q instead of %d:\n%s", got, s, want, strings.Join(f.calls, "\n"))
 				}
 			}
 		})

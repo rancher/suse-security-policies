@@ -142,7 +142,8 @@ and run it.
        render the release notes
        sign the artifact, the module file and the SUSE SBOM
        attest the SUSE SBOM, verify our own signatures
-       delete old drafts, create a draft release, publish it
+       delete old drafts, create a draft release, upload the assets
+       publish that draft by its id
        on failure: the job fails
                           |
                           v
@@ -204,8 +205,11 @@ steps in one process. Each step is a log group:
 6. Generate the SUSE SBOM.
 7. Download the upstream source archive and render the release notes.
 8. Sign and attest. The step also verifies every signature.
-9. Publish the release. The step deletes the old drafts for the tag, creates
-   a draft release and publishes it.
+9. Publish the release. The step deletes the old drafts for the tag. Then it
+   creates a draft release through the GitHub API and uploads the assets to
+   it. Last, it publishes that draft by the id in the response to the
+   creation. It does not look for the draft by its tag, because another draft
+   can have the same tag.
 
 The program signs nothing before step 8. If a step fails, the job fails and
 the later steps do not run. See [When a run fails](#when-a-run-fails).
