@@ -408,22 +408,46 @@ func sign(ctx context.Context, d *repackageData) error {
 	ref, wasm, sbom := d.immutableRef, d.path(suseWasmName), d.path(suseSBOMName)
 	wasmBundle, sbomBundle := d.path(suseWasmBundleName), d.path(suseSBOMBundleName)
 	own := d.ownIdentity
-	// An attestation of an earlier run can hold an older SBOM. This check
-	// runs before any write, so that a stale attestation changes nothing.
-	if out, err := verifyAttestation(ctx, ref, "spdxjson", own); err == nil {
-		if err := sameSBOM(ref, out, sbom); err != nil {
+	// An attestation of an earlier run can hold an older SBOM. A check can
+	// also fail for a reason that does not show whether a signature exists.
+	// All checks run before the first write, so both cases stop the run
+	// before it changes the registry.
+	//
+	// In cosign v3.1.3, a short registry error can still look like nothing
+	// signed. verify-attestation falls back to the legacy format when the
+	// referrers call fails (cmd/cosign/cli/verify/verify_attestation.go:142-146),
+	// and GetBundles skips a bundle that it cannot download
+	// (pkg/cosign/verify.go:1760-1765). Then the run attests again. If the old
+	// SBOM differs, the check after signing stops the run before it
+	// publishes, but the new attestation stays in the registry. A second
+	// attestation of the same SBOM does no harm.
+	sbomOut, sbomErr := verifyAttestation(ctx, ref, "spdxjson", own)
+	_, legacyErr := verifyLegacySignature(ctx, ref, own)
+	_, bundleErr := verifyAttestation(ctx, ref, signaturePredicateType, own)
+	if sbomErr == nil {
+		if err := sameSBOM(ref, sbomOut, sbom); err != nil {
 			return err
 		}
-	} else if _, err := cosign(ctx, "attest", "--yes", "--type", "spdxjson", "--predicate", sbom, ref); err != nil {
-		return err
 	}
-	if _, err := verifyLegacySignature(ctx, ref, own); err != nil {
-		if _, err := cosign(ctx, "sign", "--yes", "--new-bundle-format=false", "--use-signing-config=false", ref); err != nil {
-			return err
+	steps := []struct {
+		what string
+		err  error
+		args []string
+	}{
+		{"an SBOM attestation", sbomErr, []string{"attest", "--yes", "--type", "spdxjson", "--predicate", sbom, ref}},
+		{"a legacy signature", legacyErr, []string{"sign", "--yes", "--new-bundle-format=false", "--use-signing-config=false", ref}},
+		{"a v3 bundle signature", bundleErr, []string{"sign", "--yes", "--use-signing-config=true", ref}},
+	}
+	for _, s := range steps {
+		if s.err != nil && !nothingSigned(s.err) {
+			return fmt.Errorf("cannot tell whether %s already has %s, so the run signs nothing: %w", ref, s.what, s.err)
 		}
 	}
-	if _, err := verifyAttestation(ctx, ref, signaturePredicateType, own); err != nil {
-		if _, err := cosign(ctx, "sign", "--yes", "--use-signing-config=true", ref); err != nil {
+	for _, s := range steps {
+		if s.err == nil {
+			continue
+		}
+		if _, err := cosign(ctx, s.args...); err != nil {
 			return err
 		}
 	}
@@ -452,12 +476,42 @@ func sign(ctx context.Context, d *repackageData) error {
 	return verifyBlob(ctx, sbom, sbomBundle, own)
 }
 
-// sameSBOM returns nil if one attestation in the output of cosign
-// verify-attestation holds the release SBOM. cosign prints one DSSE envelope
-// per line, and its payload is the in-toto statement.
+// nothingSigned reports whether a failed check means that the artifact has
+// no signature or attestation of that kind that verifies with the identity.
+// cosign verify exits with 10 (no signatures found) or 12 (no matching
+// signatures) only for the legacy format. See
+// cmd/cosign/errors/exit_codes.go of cosign v3.1.3. Exit code 11 (tag not
+// found) does not count, because the reference is a digest that the run
+// pushed. cosign verify-attestation always exits with 1, so only its error
+// text tells the cases apart. The texts come from
+// pkg/cosign/verify.go (ErrNoMatchingAttestations) and
+// cmd/cosign/cli/verify/verify_attestation.go. cmd/cosign/main.go logs the
+// error after "error during command execution: ".
+func nothingSigned(err error) bool {
+	var exit interface{ ExitCode() int }
+	if errors.As(err, &exit) && (exit.ExitCode() == 10 || exit.ExitCode() == 12) {
+		return true
+	}
+	return err != nil && (strings.Contains(err.Error(), "error during command execution: no matching attestations") ||
+		strings.Contains(err.Error(), "error during command execution: none of the attestations matched the predicate type"))
+}
+
+// sameSBOM returns nil if the output of cosign verify-attestation holds at
+// least one attestation, and every attestation holds the release SBOM.
+// cosign prints only the attestations that verify with the identity and the
+// type, one DSSE envelope per line. The payload of an envelope is the
+// in-toto statement.
 func sameSBOM(ref string, out []byte, sbom string) error {
 	want, err := readJSON(sbom)
+	if err != nil {
+		return err
+	}
+	same, found := false, false
 	for line := range bytes.Lines(out) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		found = true
 		envelope, _ := decode(line, nil)
 		payload, _ := base64.StdEncoding.DecodeString(str(envelope, "payload"))
 		statement, _ := decode(payload, nil)
@@ -466,11 +520,17 @@ func sameSBOM(ref string, out []byte, sbom string) error {
 		if s, ok := got.(string); ok {
 			got, _ = decode([]byte(s), nil)
 		}
-		if err == nil && reflect.DeepEqual(got, want) {
-			return nil
+		if same = reflect.DeepEqual(got, want); !same {
+			break
 		}
 	}
-	return cmp.Or(err, fmt.Errorf("the SBOM attestation of %s differs from the release SBOM. A person must delete the old attestation and run again", ref))
+	if !found {
+		return fmt.Errorf("cosign verify-attestation printed no SBOM attestation of %s", ref)
+	}
+	if same {
+		return nil
+	}
+	return fmt.Errorf("one or more SBOM attestations of %s differ from the release SBOM. A person must delete the old attestations and run again", ref)
 }
 
 type releaseFile struct {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -24,6 +25,7 @@ type rule struct {
 	out    string
 	fn     func(work string) string // if not nil, gives the output at call time, in place of out
 	err    string                   // if not empty, the call fails with this message
+	exit   int                      // if not 0, the error of the call has this exit code, like an *exec.ExitError
 	write  string                   // if not empty, written to the path after -o, --output or --bundle
 	once   bool                     // if true, the rule is removed after its first match
 }
@@ -79,11 +81,20 @@ func (f *fake) run(_ context.Context, name string, args ...string) ([]byte, erro
 	if r.fn != nil {
 		out = r.fn(f.work)
 	}
+	if r.exit != 0 {
+		return []byte(out), fmt.Errorf("%s: %w: %s", name, exitError(r.exit), r.err)
+	}
 	if r.err != "" {
 		return []byte(out), errors.New(r.err)
 	}
 	return []byte(out), nil
 }
+
+type exitError int
+
+func (e exitError) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+
+func (e exitError) ExitCode() int { return int(e) }
 
 // execute runs the command line and returns what it wrote to stdout.
 func execute(t *testing.T, args ...string) (string, error) {

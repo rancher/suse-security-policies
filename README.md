@@ -329,11 +329,15 @@ whether an earlier run did it already. Then it reuses the result:
   earlier run pushed it, and the program reuses the artifact. If they
   differ, the run stops. The program never moves an OCI tag.
 - Signatures: before it signs the artifact in a format, the program runs
-  `cosign verify` for that format with the identity of this repository. If
-  the check passes, the program keeps the signature of the earlier run and
-  does not sign again. If the check fails, the program signs. The same rule
-  applies to the SBOM attestation, which `cosign verify-attestation --type
-  spdxjson` checks.
+  `cosign verify` for the legacy format, and `cosign verify-attestation
+  --type https://sigstore.dev/cosign/sign/v1` for the v3 bundle format,
+  with the identity of this repository. If the check passes, the program
+  keeps the signature of the earlier run and does not sign again. If
+  cosign reports that no matching signature exists, the program signs. Any
+  other error, for example a network error, stops the run before it writes
+  to the registry. The same rule applies to the SBOM attestation, which
+  `cosign verify-attestation --type spdxjson` checks. The program runs all
+  these checks before it signs.
 - Signature bundles: a bundle is the file that holds the signature of a file
   on the release page. The program always signs the module file and the SUSE
   SBOM again.
@@ -341,11 +345,18 @@ whether an earlier run did it already. Then it reuses the result:
 The program generates the SUSE SBOM again in each run. If the attestation of
 an earlier run verifies, the program keeps it. The SBOM does not record the
 commit of `--sha`, so a run from another commit gives the same SBOM for the
-same artifact. The program checks the SBOM attestation before the
-signatures, and it compares the SBOM in the attestation with the SBOM of the
-release. If they differ, the run stops before it writes to the registry.
+same artifact. The program checks the SBOM attestation before it signs, and
+it compares the SBOM in each attestation of this repository with the SBOM of
+the release. If one or more attestations differ, the run stops before it
+writes to the registry.
 This happens when an earlier run used another version of the program, for
 example one that wrote another tool name into the SBOM.
+
+If the check after signing finds a stale attestation, the new attestation
+stays in the registry, and the run stops before it publishes. A short
+registry error can still hide an old SBOM attestation from the first check.
+Then the run attests again, and the check after signing stops the run
+before it publishes.
 
 A stale SBOM attestation does not go away by itself. A person must delete it
 in GHCR and then start the run again:
@@ -497,8 +508,9 @@ this check fails, the run fails. The release is immutable then, so a person
 must fix it by hand.
 
 The program checks the signature and the attestation after it signs. It
-also makes sure that the SBOM in the attestation is equal to the SUSE SBOM
-file of the release. See [Running a release again](#running-a-release-again).
+also makes sure that the SBOM in each attestation of this repository is
+equal to the SUSE SBOM file of the release. See
+[Running a release again](#running-a-release-again).
 
 ### Verifying a release
 

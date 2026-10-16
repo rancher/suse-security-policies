@@ -1,17 +1,23 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
+
+// realRun is the run of helpers.go, before newFake replaces it.
+var realRun = run
 
 var (
 	testSHA        = strings.Repeat("0123456789", 4)
@@ -19,6 +25,7 @@ var (
 	upstreamDigest = "sha256:" + strings.Repeat("a", 64)
 	suseRef        = "ghcr.io/rancher/suse-security-policies/pod-privileged@sha256:" + strings.Repeat("b", 64)
 	spdxCheck      = "cosign verify-attestation " + suseRef + " --type spdxjson "
+	signCheck      = "cosign verify-attestation " + suseRef + " --type " + signaturePredicateType + " "
 )
 
 const (
@@ -162,16 +169,41 @@ annotations:
 	}
 }
 
+// The errors of cosign v3.1.3 when nothing verifies, or when a check fails
+// for another reason. cobra prints the error, and then main logs it.
+const (
+	noSignatures   = "Error: no signatures found\n2026/01/02 03:04:05 error during command execution: no signatures found"
+	noAttestations = "Error: no matching attestations: \n2026/01/02 03:04:05 error during command execution: no matching attestations: "
+	noSignatureAtt = "Error: none of the attestations matched the predicate type: " + signaturePredicateType + ", found: https://spdx.dev/Document\n" +
+		"2026/01/02 03:04:05 error during command execution: none of the attestations matched the predicate type: " + signaturePredicateType + ", found: https://spdx.dev/Document"
+	noSPDXAtt = "Error: none of the attestations matched the predicate type: https://spdx.dev/Document, found: " + signaturePredicateType + "\n" +
+		"2026/01/02 03:04:05 error during command execution: none of the attestations matched the predicate type: https://spdx.dev/Document, found: " + signaturePredicateType
+	timeout = "Error: Get \"https://ghcr.io/v2/\": dial tcp: i/o timeout\n2026/01/02 03:04:05 error during command execution: Get \"https://ghcr.io/v2/\": dial tcp: i/o timeout"
+	badGate = "Error: GET https://ghcr.io/v2/rancher/suse-security-policies/pod-privileged/manifests/sha256-b.sig: unexpected status code 502 Bad Gateway"
+	tooMany = "Error: GET https://ghcr.io/v2/rancher/suse-security-policies/pod-privileged/referrers/sha256:b: TOOMANYREQUESTS: retry later"
+)
+
 // freshRules describe a run where the destination tag does not exist and
 // no signature verifies.
 func freshRules() []rule {
 	return append([]rule{
 		{prefix: destPull, err: "Error: manifest unknown"},
 		{prefix: "kwctl push -o json ", out: `{"immutable_ref":"` + suseRef + `"}`},
-		{prefix: ownVerify, err: "no signatures found", once: true},
-		{prefix: "cosign verify-attestation ghcr.io/rancher/", err: "no attestations found", once: true},
-		{prefix: "cosign verify-attestation ghcr.io/rancher/", err: "no attestations found", once: true},
+		{prefix: ownVerify, err: noSignatures, exit: 10, once: true},
+		{prefix: "cosign verify-attestation ghcr.io/rancher/", err: noAttestations, exit: 1, once: true},
+		{prefix: "cosign verify-attestation ghcr.io/rancher/", err: noAttestations, exit: 1, once: true},
 	}, rerunRules()...)
+}
+
+// joined gives the outputs of fns one after the other.
+func joined(fns ...func(work string) string) func(work string) string {
+	return func(work string) string {
+		var out string
+		for _, fn := range fns {
+			out += fn(work)
+		}
+		return out
+	}
 }
 
 // renamed gives the policy the id name_unknown, which looks like the OCI
@@ -205,6 +237,12 @@ func TestRepackage(t *testing.T) {
 			{prefix: ownRepo + "releases/7", fn: release(7, draft, nil)}}
 	}
 	otherDigest := "sha256:" + strings.Repeat("f", 64)
+	// An earlier run attested an SBOM with another tool name.
+	staleSBOM := func(sbom map[string]any) {
+		sbom["creationInfo"].(map[string]any)["creators"] = []any{"Organization: SUSE", "Tool: suse-security-policies-" + testSHA}
+	}
+	staleErr := "differ from the release SBOM"
+	noWrite := []string{"cosign sign", "cosign attest", ownCreate, ownUpload, "-X PATCH", "-X DELETE"}
 	// published gives the rules of a draft that passes its check, but changes
 	// when it is published.
 	published := func(edit func(rel map[string]any, assets []map[string]any)) []rule {
@@ -405,11 +443,43 @@ func TestRepackage(t *testing.T) {
 			wantErr: "cannot upload " + sourceArchiveName, forbid: []string{"-X PATCH", "?name=" + suseSBOMName + " "}},
 		{name: "publication fails", rules: append([]rule{{prefix: "gh api --hostname github.com -X PATCH ", err: "gh: Server Error (HTTP 502)"}}, rerunRules()...),
 			wantErr: "HTTP 502", count: map[string]int{ownUpload + "42/assets?name=": 7, "-X PATCH": 1}},
-		// An earlier run attested an SBOM with another tool name.
-		{name: "stale SBOM attestation", rules: append([]rule{{prefix: spdxCheck, fn: attested(func(sbom map[string]any) {
-			sbom["creationInfo"].(map[string]any)["creators"] = []any{"Organization: SUSE", "Tool: suse-security-policies-" + testSHA}
-		})}}, rerunRules()...), wantErr: "differs from the release SBOM",
-			forbid: []string{"cosign sign", "cosign attest", ownCreate, ownUpload, "-X PATCH", "-X DELETE"}},
+		{name: "stale SBOM attestation", rules: append([]rule{{prefix: spdxCheck, fn: attested(staleSBOM)}}, rerunRules()...), wantErr: staleErr, forbid: noWrite},
+		{name: "fresh run", rules: freshRules(), want: []string{"kwctl push", ownCreate},
+			count: map[string]int{"cosign attest --yes --type spdxjson ": 1, "cosign sign --yes --new-bundle-format=false ": 1, "cosign sign --yes --use-signing-config=true ": 1, "-X PATCH": 1}},
+		{name: "SBOM attested but not signed", rules: append([]rule{
+			{prefix: ownVerify, err: noSignatures, exit: 10, once: true},
+			{prefix: signCheck, err: noSignatureAtt, exit: 1, once: true},
+		}, rerunRules()...), forbid: []string{"cosign attest"},
+			count: map[string]int{"cosign sign --yes --new-bundle-format=false ": 1, "cosign sign --yes --use-signing-config=true ": 1}},
+		// The legacy signature exists, but none verifies with the identity of this repository.
+		{name: "no matching legacy signature", rules: append([]rule{{prefix: ownVerify, err: "Error: no matching signatures: none of the expected identities matched", exit: 12, once: true}}, rerunRules()...),
+			forbid: []string{"cosign attest", "cosign sign --yes --use-signing-config=true"}, count: map[string]int{"cosign sign --yes --new-bundle-format=false ": 1}},
+		// A short network error must not hide the stale attestation of an earlier run.
+		{name: "SBOM check fails with a network error", rules: append([]rule{
+			{prefix: spdxCheck, err: timeout, exit: 1, once: true},
+			{prefix: spdxCheck, fn: attested(staleSBOM)},
+		}, rerunRules()...), wantErr: "cannot tell whether " + suseRef + " already has an SBOM attestation", forbid: noWrite},
+		{name: "legacy check fails with a network error", rules: append([]rule{{prefix: ownVerify, err: badGate, exit: 1, once: true}}, freshRules()...),
+			wantErr: "cannot tell whether " + suseRef + " already has a legacy signature", forbid: noWrite},
+		{name: "legacy check fails with a missing tag", rules: append([]rule{{prefix: ownVerify, err: "Error: image tag not found", exit: 11, once: true}}, freshRules()...),
+			wantErr: "cannot tell whether", forbid: noWrite},
+		{name: "v3 check fails with a network error", rules: append([]rule{{prefix: signCheck, err: tooMany, exit: 1, once: true}}, freshRules()...),
+			wantErr: "cannot tell whether " + suseRef + " already has a v3 bundle signature", forbid: noWrite},
+		{name: "one stale and one current SBOM attestation", rules: append([]rule{{prefix: spdxCheck, fn: joined(attested(nil), attested(staleSBOM))}}, rerunRules()...),
+			wantErr: staleErr, forbid: noWrite},
+		{name: "stale SBOM attestation after the attestation", rules: append([]rule{
+			{prefix: spdxCheck, err: noAttestations, exit: 1, once: true},
+			{prefix: spdxCheck, fn: joined(attested(staleSBOM), attested(nil))},
+		}, rerunRules()...), wantErr: staleErr, count: map[string]int{"cosign attest": 1}, forbid: []string{"cosign sign --", ownCreate, ownUpload, "-X PATCH"}},
+		{name: "SBOM attestation that does not decode", rules: append([]rule{{prefix: spdxCheck, fn: joined(attested(nil), func(string) string { return "{not json\n" })}}, rerunRules()...),
+			wantErr: staleErr, forbid: noWrite},
+		{name: "blank lines in the SBOM attestation output", rules: append([]rule{{prefix: spdxCheck, fn: joined(attested(nil), func(string) string { return "\n \n" })}}, rerunRules()...),
+			forbid: []string{"cosign sign --", "cosign attest"}, want: []string{"-X PATCH"}},
+		{name: "SBOM check prints no attestation", rules: append([]rule{{prefix: spdxCheck, out: "\n"}}, rerunRules()...),
+			wantErr: "cosign verify-attestation printed no SBOM attestation of " + suseRef, forbid: noWrite},
+		// An earlier run wrote only the signatures.
+		{name: "signed but SBOM not attested", rules: append([]rule{{prefix: spdxCheck, err: noSPDXAtt, exit: 1, once: true}}, rerunRules()...),
+			forbid: []string{"cosign sign --"}, count: map[string]int{"cosign attest --yes --type spdxjson ": 1, "-X PATCH": 1}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -487,6 +557,45 @@ func TestRepackage(t *testing.T) {
 				if got != want {
 					t.Errorf("%d commands contain %q instead of %d:\n%s", got, s, want, strings.Join(f.calls, "\n"))
 				}
+			}
+		})
+	}
+}
+
+// TestNothingSigned runs real processes, so that the test uses the errors of
+// os/exec and not those of the fake.
+func TestNothingSigned(t *testing.T) {
+	oldLog := logOut
+	logOut = io.Discard
+	t.Cleanup(func() { logOut = oldLog })
+	timedOut, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	tests := []struct {
+		name string
+		ctx  context.Context
+		args []string
+		want bool
+	}{
+		{name: "no matching signatures", args: []string{"sh", "-c", "exit 12"}, want: true},
+		{name: "no signatures found", args: []string{"sh", "-c", "exit 10"}, want: true},
+		{name: "tag not found", args: []string{"sh", "-c", "exit 11"}},
+		{name: "no matching attestations", args: []string{"sh", "-c", "echo 'error during command execution: no matching attestations: ' >&2; exit 1"}, want: true},
+		{name: "other error", args: []string{"sh", "-c", "echo 'error during command execution: dial tcp: i/o timeout' >&2; exit 1"}},
+		{name: "killed by a signal", args: []string{"sh", "-c", "kill -9 $$"}},
+		{name: "context timeout", ctx: timedOut, args: []string{"sleep", "5"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := tt.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			_, err := realRun(ctx, tt.args[0], tt.args[1:]...)
+			if err == nil {
+				t.Fatal("the command did not fail")
+			}
+			if got := nothingSigned(err); got != tt.want {
+				t.Errorf("nothingSigned(%q) is %v instead of %v", err, got, tt.want)
 			}
 		})
 	}

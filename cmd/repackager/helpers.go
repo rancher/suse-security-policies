@@ -24,7 +24,7 @@ var run = func(ctx context.Context, name string, args ...string) ([]byte, error)
 	if err := cmd.Run(); err != nil {
 		tail := strings.TrimSpace(stderr.String())
 		// The callers match the error text, so it holds only the stderr of the
-		// tool and not the args.
+		// tool and not the args. nothingSigned reads the exit code through %w.
 		return stdout.Bytes(), fmt.Errorf("%s: %w: %s", name, err, tail[max(0, len(tail)-2048):])
 	}
 	return stdout.Bytes(), nil
