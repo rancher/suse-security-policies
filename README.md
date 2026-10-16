@@ -108,7 +108,9 @@ signing and distribution problems here.
   sha256 digest of each asset. It also checks that the tag does not exist and
   that no published release has the tag. After the publication, it reads the
   release again and makes the same checks. It also makes sure that the tag
-  points at the commit of the run.
+  points at the commit of the run. GitHub can show the new release a little
+  later. This check runs up to 3 times, with a wait of 2 and then 8 seconds
+  between the tries.
 - GitHub cannot check and publish a release in one step. A person or a token
   with write access to the repository can change the draft or push the tag
   between the check and the publication. The program finds such a change

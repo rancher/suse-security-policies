@@ -676,12 +676,15 @@ func publish(ctx context.Context, d *repackageData) error {
 	// GitHub cannot check and publish a release in one call. Thus only these
 	// reads show a change between the check above and the publication. After
 	// the publication, the assets and the tag cannot change, so they are final.
-	var ref any
-	rel, err = decode(githubAPI(ctx, releasePath))
-	if err == nil {
-		ref, err = decode(githubAPI(ctx, tagPath))
-	}
-	if err == nil {
+	checkPublished := func() error {
+		rel, err := decode(githubAPI(ctx, releasePath))
+		if err != nil {
+			return err
+		}
+		ref, err := decode(githubAPI(ctx, tagPath))
+		if err != nil {
+			return err
+		}
 		// A draft has only a temporary download address.
 		want := "https://github.com/" + d.repo + "/releases/download/" + d.tag + "/" + suseWasmName
 		var noURL, wrongTag error
@@ -691,7 +694,22 @@ func publish(ctx context.Context, d *repackageData) error {
 		if typ, sha := str(ref, "object", "type"), str(ref, "object", "sha"); typ != "commit" || sha != d.sha {
 			wrongTag = fmt.Errorf("the tag %s points at the %s %q instead of the commit %s", d.tag, typ, sha, d.sha)
 		}
-		err = errors.Join(checkRelease(rel, d, int64(id), files, false), noURL, wrongTag)
+		return errors.Join(checkRelease(rel, d, int64(id), files, false), noURL, wrongTag)
+	}
+	// Right after the publication, GitHub can still show the release as a
+	// draft or the tag as missing for a short time, so a failed check gets
+	// more tries. The check of the draft gets no retry. If it fails, the run
+	// stops before the publication, and a later run can try again.
+	err = checkPublished()
+	for _, wait := range retryWaits {
+		if err == nil || ctx.Err() != nil {
+			break
+		}
+		logf("::warning::%s", escapeData(fmt.Sprintf("the check of the published release %s failed: %v. The run tries again in %s.", d.tag, err, wait)))
+		if sleep(ctx, wait) != nil {
+			break
+		}
+		err = checkPublished()
 	}
 	failure, cleanupFailure := "", ""
 	if err != nil {
